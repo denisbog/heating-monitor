@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Heating monitor</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f8fafc" media="(prefers-color-scheme: light)">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Heating">
+<style>
+  :root {
+    color-scheme: light dark;
+    --line: #8883;
+    --muted: #8888;
+    --err: #c33;
+    --ok: #2a2;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font: 14px/1.5 system-ui, -apple-system, sans-serif;
+    margin: 0 auto; max-width: 68rem;
+    padding: calc(1.5rem + env(safe-area-inset-top))
+             max(1rem, env(safe-area-inset-right))
+             calc(4rem + env(safe-area-inset-bottom))
+             max(1rem, env(safe-area-inset-left));
+  }
+  h1 { font-size: 1.3rem; margin: 0; }
+  h2 { font-size: .95rem; text-transform: uppercase; letter-spacing: .06em; opacity: .6; margin: 2rem 0 .75rem; }
+  .sub { opacity: .6; }
+  a { color: inherit; }
+
+  form.auth { display: flex; gap: .5rem; margin: 1rem 0 .5rem; }
+  input, button {
+    font: inherit; padding: .45rem .7rem; border-radius: 7px;
+    border: 1px solid var(--line); background: transparent; color: inherit;
+  }
+  input { flex: 1; min-width: 0; }
+  button { cursor: pointer; white-space: nowrap; }
+  button:hover:not(:disabled) { border-color: currentColor; }
+  button:disabled { opacity: .4; cursor: default; }
+  .bar { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-bottom: .75rem; }
+  .seg { display: flex; }
+  .seg button { border-radius: 0; border-left-width: 0; }
+  .seg button:first-child { border-radius: 7px 0 0 7px; border-left-width: 1px; }
+  .seg button:last-child { border-radius: 0 7px 7px 0; }
+  .seg button[aria-pressed="true"] { background: #8883; font-weight: 600; }
+
+  .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(min(22rem, 100%), 1fr)); }
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: .75rem .9rem 1rem; position: relative; }
+  .card h3 { font-size: .95rem; margin: 0 0 .1rem; }
+  .card .meta { font-size: .78rem; opacity: .55; margin-bottom: .5rem; }
+  .legend { display: flex; flex-wrap: wrap; gap: .1rem .9rem; font-size: .78rem; margin-top: .4rem; }
+  .legend span { display: inline-flex; align-items: center; gap: .35rem; }
+  .swatch { width: .7rem; height: .7rem; border-radius: 2px; flex: none; }
+  .legend b { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  svg { display: block; width: 100%; height: auto; touch-action: none; }
+  .gl { stroke: var(--line); stroke-width: 1; }
+  .axis { fill: var(--muted); font-size: 10px; }
+  .cursor { stroke: currentColor; stroke-width: 1; opacity: .45; }
+  .tip {
+    position: absolute; pointer-events: none; z-index: 5; font-size: .78rem;
+    background: canvas; border: 1px solid var(--line); border-radius: 7px;
+    padding: .35rem .5rem; box-shadow: 0 2px 10px #0002; white-space: nowrap;
+    font-variant-numeric: tabular-nums; opacity: 0; transition: opacity .08s;
+  }
+  .tip table { border-collapse: collapse; }
+  .tip td { padding: 0 .35rem 0 0; }
+  .tip td:last-child { padding-right: 0; text-align: right; }
+
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: .28rem .5rem; border-bottom: 1px solid var(--line); }
+  th { font-weight: 600; opacity: .6; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+  td.num { text-align: right; }
+  details { margin-top: 1rem; }
+  summary { cursor: pointer; opacity: .6; font-size: .85rem; }
+  .err { color: var(--err); }
+  .ok { color: var(--ok); }
+  .empty { opacity: .5; padding: 2rem 0; text-align: center; font-size: .85rem; }
+</style>
+</head>
+<body>
+<h1>Heating monitor</h1>
+<p class="sub" id="subtitle">iLetComfort heat pump &middot; CAME THermo Wi-Fi thermostats</p>
+
+<form class="auth" id="auth">
+  <input id="token" type="password" placeholder="API token" autocomplete="off" spellcheck="false">
+  <button>Save</button>
+</form>
+
+<div class="bar">
+  <div class="seg" id="range">
+    <button data-h="24" aria-pressed="false">24 h</button>
+    <button data-h="168" aria-pressed="true">7 d</button>
+    <button data-h="720" aria-pressed="false">30 d</button>
+    <button data-h="2160" aria-pressed="false">90 d</button>
+  </div>
+  <button id="collect">Collect now</button>
+  <button id="reload">Reload</button>
+  <span id="status" class="sub"></span>
+</div>
+
+<div id="charts"></div>
+
+<h2>Collector runs</h2>
+<table id="runs"><thead><tr>
+  <th>Started</th><th>Status</th><th class="num">Devices</th><th class="num">Readings</th><th>Error</th>
+</tr></thead><tbody></tbody></table>
+
+<details>
+  <summary>Latest values (raw)</summary>
+  <table id="latest"><thead><tr>
+    <th>Device</th><th>Metric</th><th class="num">Value</th><th>Unit</th><th>When</th>
+  </tr></thead><tbody></tbody></table>
+</details>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const PALETTE = ["#4c8dff", "#ff8a3d", "#37c98b", "#e05c8a", "#b98cff", "#d9c02c", "#39b7c9", "#f2645a"];
+// Metrics that are flags/noise rather than measurements worth a line.
+const SKIP = new Set(["online", "error_code", "error"]);
+
+const state = { range: 168 * 3600, devices: [], token: localStorage.getItem("apiToken") || "" };
+
+$("#token").value = state.token;
+
+async function api(path) {
+  const r = await fetch(path, { headers: { authorization: "Bearer " + state.token } });
+  if (!r.ok) throw new Error(path + " -> HTTP " + r.status);
+  return r.json();
+}
+
+function setStatus(msg, cls = "sub") {
+  const el = $("#status");
+  el.textContent = msg;
+  el.className = cls;
+}
+
+const fmtNum = (v) => v === null || v === undefined ? "" : (Math.abs(v) >= 100 ? v.toFixed(1) : v.toFixed(2));
+// 24-hour clock everywhere. `hourCycle: "h23"` rather than `hour12: false`
+// because the latter renders midnight as "24:00" on some ICU versions.
+const H24 = { hourCycle: "h23" };
+const fmtTime = (ts) =>
+  ts
+    ? new Date(ts * 1000).toLocaleString(undefined, {
+        year: "numeric", month: "short", day: "numeric",
+        hour: "2-digit", minute: "2-digit", ...H24,
+      })
+    : "";
+const fmtDay = (ms) => new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+// Tick labels have to fit between ticks, which is tight on a narrow card.
+// Time-only under 36 h, date + time up to 3 days, date-only beyond.
+const fmtTick = (ms, spanMs) => {
+  const d = new Date(ms);
+  if (spanMs > 3 * 864e5) return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  if (spanMs > 36 * 36e5) return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", ...H24 });
+  return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", ...H24 });
+};
+
+// Short description of the selected window, shown in the card subtitle.
+const fmtRange = (w) => {
+  const f = new Date(w.from), t = new Date(w.to);
+  const d = (x) => x.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const hm = (x) => x.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", ...H24 });
+  const sameDay = f.toDateString() === t.toDateString();
+  if (w.to - w.from > 36 * 36e5) return `${d(f)} – ${d(t)}`;
+  return sameDay ? `${d(f)} ${hm(f)} – ${hm(t)}` : `${d(f)} ${hm(f)} – ${d(t)} ${hm(t)}`;
+};
+
+// ---------------------------------------------------------------------------
+// Data shaping
+// ---------------------------------------------------------------------------
+
+/// rows -> Map<unit, Map<metric, points[]>>  with points = {x(ms), y, label}
+function groupByUnit(rows, daily) {
+  const byUnit = new Map();
+  for (const r of rows) {
+    if (SKIP.has(r.metric)) continue;
+    const y = daily ? r.avg : r.value;
+    if (y === null || y === undefined || !isFinite(y)) continue;
+    const x = daily ? Date.parse(r.day + "T00:00:00Z") : r.ts * 1000;
+    if (!isFinite(x)) continue;
+    const unit = r.unit || "";
+    if (!byUnit.has(unit)) byUnit.set(unit, new Map());
+    const m = byUnit.get(unit);
+    if (!m.has(r.metric)) m.set(r.metric, []);
+    m.get(r.metric).push({ x, y, label: daily ? r.day : fmtTime(r.ts) });
+  }
+  for (const m of byUnit.values()) {
+    for (const pts of m.values()) pts.sort((a, b) => a.x - b.x);
+  }
+  return byUnit;
+}
+
+// ---------------------------------------------------------------------------
+// Chart
+// ---------------------------------------------------------------------------
+
+function chartCard(title, meta, series, unit, daily, win) {
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = `<h3>${esc(title)}</h3><div class="meta">${esc(meta)}</div>
+    <div class="plot"></div><div class="tip"></div><div class="legend"></div>`;
+  const plot = card.querySelector(".plot");
+  const colors = new Map(series.map((s, i) => [s.name, PALETTE[i % PALETTE.length]]));
+
+  const draw = () => {
+    const W = Math.max(280, plot.clientWidth || 320);
+    plot.innerHTML = "";
+    const H = 190, P = { t: 10, r: 12, b: 24, l: 46 };
+    const iw = W - P.l - P.r, ih = H - P.t - P.b;
+
+    const all = series.flatMap((s) => s.points);
+    if (!all.length) {
+      plot.innerHTML = '<div class="empty">no data in this range</div>';
+      return;
+    }
+
+    // Anchor the x axis to the requested window when there is one, so a "24 h"
+    // view always spans 24 h even if only a few samples exist yet. Never clip
+    // data: widen to include anything outside the window.
+    const dataMin = Math.min(...all.map((p) => p.x));
+    const dataMax = Math.max(...all.map((p) => p.x));
+    const useWin = win && win.to > win.from;
+    let x0 = useWin ? Math.min(win.from, dataMin) : dataMin;
+    let x1 = useWin ? Math.max(win.to, dataMax) : dataMax;
+    let y0 = Math.min(...all.map((p) => p.y)), y1 = Math.max(...all.map((p) => p.y));
+    if (x0 === x1) { x0 -= 36e5; x1 += 36e5; }
+    if (y0 === y1) { const d = Math.max(Math.abs(y0) * 0.1, 0.5); y0 -= d; y1 += d; }
+    const pad = (y1 - y0) * 0.08; y0 -= pad; y1 += pad;
+
+    const X = (t) => P.l + ((t - x0) / (x1 - x0)) * iw;
+    const Y = (v) => P.t + ih - ((v - y0) / (y1 - y0)) * ih;
+
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("height", H);
+
+    // horizontal gridlines + y labels
+    for (let i = 0; i <= 4; i++) {
+      const v = y0 + ((y1 - y0) * i) / 4, y = Y(v);
+      const ln = document.createElementNS(ns, "line");
+      ln.setAttribute("class", "gl");
+      ln.setAttribute("x1", P.l); ln.setAttribute("x2", W - P.r);
+      ln.setAttribute("y1", y); ln.setAttribute("y2", y);
+      svg.appendChild(ln);
+      const tx = document.createElementNS(ns, "text");
+      tx.setAttribute("class", "axis");
+      tx.setAttribute("x", P.l - 6); tx.setAttribute("y", y + 3);
+      tx.setAttribute("text-anchor", "end");
+      tx.textContent = fmtNum(v);
+      svg.appendChild(tx);
+    }
+
+    // x ticks
+    const span = x1 - x0, n = W < 420 ? 3 : 5;
+    let lastLabel = null;
+    for (let i = 0; i <= n; i++) {
+      const t = x0 + (span * i) / n;
+      const label = daily ? fmtDay(t) : fmtTick(t, span);
+      if (label === lastLabel) continue; // don't stack identical ticks
+      lastLabel = label;
+      const tx = document.createElementNS(ns, "text");
+      tx.setAttribute("class", "axis");
+      tx.setAttribute("x", Math.min(Math.max(X(t), P.l), W - P.r));
+      tx.setAttribute("y", H - 8);
+      tx.setAttribute("text-anchor", i === 0 ? "start" : i === n ? "end" : "middle");
+      tx.textContent = label;
+      svg.appendChild(tx);
+    }
+
+    // series
+    for (const s of series) {
+      const color = colors.get(s.name);
+      if (s.points.length === 1) {
+        const c = document.createElementNS(ns, "circle");
+        c.setAttribute("cx", X(s.points[0].x)); c.setAttribute("cy", Y(s.points[0].y));
+        c.setAttribute("r", 3); c.setAttribute("fill", color);
+        svg.appendChild(c);
+      } else {
+        const d = s.points.map((p, i) => `${i ? "L" : "M"}${X(p.x).toFixed(1)},${Y(p.y).toFixed(1)}`).join(" ");
+        const path = document.createElementNS(ns, "path");
+        path.setAttribute("d", d);
+        path.setAttribute("fill", "none");
+        path.setAttribute("stroke", color);
+        path.setAttribute("stroke-width", "1.8");
+        path.setAttribute("stroke-linejoin", "round");
+        svg.appendChild(path);
+      }
+    }
+
+    // hover
+    const cursor = document.createElementNS(ns, "line");
+    cursor.setAttribute("class", "cursor");
+    cursor.setAttribute("y1", P.t); cursor.setAttribute("y2", P.t + ih);
+    cursor.style.display = "none";
+    svg.appendChild(cursor);
+
+    const dots = series.map(() => {
+      const c = document.createElementNS(ns, "circle");
+      c.setAttribute("r", 3.5); c.setAttribute("fill", "canvas");
+      c.setAttribute("stroke-width", "2");
+      c.style.display = "none";
+      svg.appendChild(c);
+      return c;
+    });
+
+    const hit = document.createElementNS(ns, "rect");
+    hit.setAttribute("x", P.l); hit.setAttribute("y", P.t);
+    hit.setAttribute("width", iw); hit.setAttribute("height", ih);
+    hit.setAttribute("fill", "transparent");
+    svg.appendChild(hit);
+
+    const tip = card.querySelector(".tip");
+
+    const show = (ev) => {
+      const rect = svg.getBoundingClientRect();
+      const px = ((ev.clientX ?? ev.touches?.[0]?.clientX ?? 0) - rect.left) * (W / rect.width);
+      const t = x0 + ((px - P.l) / iw) * (x1 - x0);
+      let any = false;
+      tip.innerHTML = "";
+      const tbl = document.createElement("table");
+
+      series.forEach((s, i) => {
+        let best = null;
+        for (const p of s.points) if (!best || Math.abs(p.x - t) < Math.abs(best.x - t)) best = p;
+        const d = dots[i];
+        if (!best) { d.style.display = "none"; return; }
+        any = true;
+        d.style.display = "";
+        d.setAttribute("cx", X(best.x)); d.setAttribute("cy", Y(best.y));
+        d.setAttribute("stroke", colors.get(s.name));
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td><span class="swatch" style="background:${colors.get(s.name)};display:inline-block"></span></td>
+                        <td>${esc(s.name)}</td><td>${fmtNum(best.y)} ${esc(unit)}</td>`;
+        tbl.appendChild(tr);
+      });
+
+      if (!any) { tip.style.opacity = "0"; cursor.style.display = "none"; return; }
+
+      // nearest sample time, as the tooltip heading
+      let anchor = null;
+      for (const s of series) for (const p of s.points)
+        if (!anchor || Math.abs(p.x - t) < Math.abs(anchor.x - t)) anchor = p;
+      const head = document.createElement("div");
+      head.style.opacity = ".6";
+      head.textContent = anchor.label;
+      tip.innerHTML = "";
+      tip.append(head, tbl);
+      tip.style.opacity = "1";
+
+      const cx = X(anchor.x);
+      cursor.style.display = "";
+      cursor.setAttribute("x1", cx); cursor.setAttribute("x2", cx);
+      const left = Math.min(Math.max((cx / W) * rect.width - 60, 0), rect.width - 130);
+      tip.style.left = left + "px";
+      tip.style.top = P.t + "px";
+    };
+
+    const hide = () => {
+      tip.style.opacity = "0";
+      cursor.style.display = "none";
+      dots.forEach((d) => (d.style.display = "none"));
+    };
+
+    svg.addEventListener("mousemove", show);
+    svg.addEventListener("touchmove", (e) => { show(e); e.preventDefault(); }, { passive: false });
+    svg.addEventListener("mouseleave", hide);
+    svg.addEventListener("touchend", hide);
+    plot.appendChild(svg);
+  };
+
+  const legend = card.querySelector(".legend");
+  legend.innerHTML = series.map((s) => {
+    const last = s.points[s.points.length - 1];
+    return `<span><i class="swatch" style="background:${colors.get(s.name)}"></i>${esc(s.name)}
+            <b>${last ? fmtNum(last.y) : "—"}</b></span>`;
+  }).join("");
+
+  return { card, draw };
+}
+
+// ---------------------------------------------------------------------------
+// Render
+// ---------------------------------------------------------------------------
+
+let draws = [];
+
+function render(perDevice, daily, win) {
+  const root = $("#charts");
+  root.innerHTML = "";
+  draws = [];
+
+  for (const { device, rows } of perDevice) {
+    const byUnit = groupByUnit(rows, daily);
+    const wrap = document.createElement("section");
+    wrap.style.marginTop = "1.5rem";
+
+    const label = device.name || device.external_id;
+    const head = document.createElement("h2");
+    head.textContent = `${label} · ${device.provider}`;
+    wrap.appendChild(head);
+
+    if (device.model) head.textContent += ` · ${device.model}`;
+
+    if (!byUnit.size) {
+      const e = document.createElement("div");
+      e.className = "empty";
+      e.textContent = "no readings yet";
+      wrap.appendChild(e);
+      root.appendChild(wrap);
+      continue;
+    }
+
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    for (const [unit, metrics] of [...byUnit].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const series = [...metrics].map(([name, points]) => ({ name, points }));
+      const title = unit || "state";
+      const { card, draw } = chartCard(
+        `${title} · ${label}`,
+        `${series.length} series · ${daily ? "daily average" : "15-minute samples"}` +
+          (win ? ` · ${fmtRange(win)}` : ""),
+        series,
+        unit,
+        daily,
+        win,
+      );
+      grid.appendChild(card);
+      draws.push(draw);
+    }
+    wrap.appendChild(grid);
+    root.appendChild(wrap);
+  }
+
+  draws.forEach((d) => d());
+}
+
+// ---------------------------------------------------------------------------
+// Loading
+// ---------------------------------------------------------------------------
+
+async function load() {
+  if (!state.token) { setStatus("Enter the API token to load data."); return; }
+  setStatus("Loading…");
+  try {
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - state.range;
+    const daily = state.range > 2 * 86400;
+    const win = { from: from * 1000, to: to * 1000 };
+
+    const devices = await api("/api/devices");
+    state.devices = devices;
+
+    const perDevice = [];
+    for (const d of devices) {
+      const q = new URLSearchParams({ device: d.id, from, to });
+      const rows = daily
+        ? await api("/api/daily?" + q)
+        : await api("/api/readings?" + new URLSearchParams({ ...Object.fromEntries(q), limit: 5000 }));
+      perDevice.push({ device: d, rows });
+    }
+    render(perDevice, daily, win);
+
+    const [latest, runs] = await Promise.all([api("/api/latest"), api("/api/runs?limit=20")]);
+    $("#latest tbody").innerHTML = latest.map((r) => `<tr>
+        <td>${esc(r.device_id)}</td><td>${esc(r.metric)}</td>
+        <td class="num">${fmtNum(r.value)}</td><td>${esc(r.unit)}</td>
+        <td>${esc(fmtTime(r.ts))}</td></tr>`).join("");
+    $("#runs tbody").innerHTML = runs.map((r) => `<tr>
+        <td>${esc(fmtTime(r.started_at))}</td><td>${esc(r.status)}</td>
+        <td class="num">${r.devices_seen ?? 0}</td><td class="num">${r.readings_written ?? 0}</td>
+        <td class="${r.error ? "err" : ""}">${esc(r.error)}</td></tr>`).join("");
+
+    const total = perDevice.reduce((n, p) => n + p.rows.length, 0);
+    setStatus(`Loaded ${devices.length} devices, ${total} points.`, "ok");
+  } catch (e) {
+    setStatus(
+      navigator.onLine
+        ? String(e.message || e)
+        : "Offline — showing the cached page; live data unavailable.",
+      "err",
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+$("#auth").addEventListener("submit", (e) => {
+  e.preventDefault();
+  state.token = $("#token").value.trim();
+  localStorage.setItem("apiToken", state.token);
+  load();
+});
+
+$("#range").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  state.range = Number(b.dataset.h) * 3600;
+  [...$("#range").children].forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+  load();
+});
+
+$("#reload").addEventListener("click", load);
+
+$("#collect").addEventListener("click", async () => {
+  const btn = $("#collect");
+  btn.disabled = true;
+  setStatus("Collecting — this can take a few seconds…");
+  try {
+    const r = await fetch("/api/collect", {
+      method: "POST",
+      headers: { authorization: "Bearer " + state.token },
+    });
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      throw new Error(text ? text + " (HTTP " + r.status + ")" : "HTTP " + r.status);
+    }
+    const body = await r.json();
+    setStatus(`Collected ${body.devices} devices, ${body.readings} readings.`, "ok");
+    await load();
+  } catch (e) {
+    setStatus("Collect failed: " + (e.message || e), "err");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+let rt;
+window.addEventListener("resize", () => {
+  clearTimeout(rt);
+  rt = setTimeout(() => draws.forEach((d) => d()), 150);
+});
+
+if (state.token) load();
+
+// --- PWA -------------------------------------------------------------------
+window.addEventListener("online", () => {
+  setStatus("Back online.");
+  load();
+});
+window.addEventListener("offline", () =>
+  setStatus("Offline — showing the cached page; live data unavailable.", "err"),
+);
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch((e) => console.warn("service worker:", e));
+  });
+}
+</script>
+</body>
+</html>

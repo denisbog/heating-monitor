@@ -1,0 +1,29 @@
+[package]
+name = "monitoring-worker"
+version = "0.1.0"
+edition = "2021"
+description = "Collector + API for iLetComfort (ITS/BTRI heat pump) and CAME THermo Wi-Fi thermostats"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+worker = { version = "0.8.7", features = ["d1"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# iLetComfort signing / password encryption
+sha2 = "0.10"
+hmac = "0.12"
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+base64 = "0.22"
+hex = "0.4"
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1

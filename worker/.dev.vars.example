@@ -1,0 +1,28 @@
+# Copy to `.dev.vars` (gitignored) and fill in. Then push them all:
+#     ./set-secrets.sh
+#
+# Values are piped to `wrangler secret put` on stdin, so they never appear in
+# your shell history, in `ps`, or in any transcript.
+
+ILETCOMFORT_REGION=eu
+
+# iLetComfort / ITS heat pump  (from ~/.config/monitoring/credentials.toml)
+ILETCOMFORT_USERNAME=
+ILETCOMFORT_PASSWORD=
+
+# CAME Connect (THermo Wi-Fi thermostats)
+CAMECONNECT_USERNAME=
+CAMECONNECT_PASSWORD=
+
+# These two are NOT personal secrets — they are baked into CAME's public web app
+# bundle and shared by every user. Pre-filled for convenience.
+CAMECONNECT_CLIENT_ID=58FnU0A4KqLYo3zJO1GMuYpTu74RyfnL
+CAMECONNECT_CLIENT_SECRET=T23FhzVZCXUD87TwP21L3ALdJYcPGCCPSqQTjMrnwG5SwQY6w6xFa9hnidS9KkZb8MMUBJJC8U2UdpFqdUVjbXtzdNqUk9eDu72VF6YdKTq8Z8ULzmbcAvgEiNwzZq2x6RLxF7ewCqAMUcUBPEAXhJwqv7j6f3bxJZNZZmLpWn5b8MqVxwk6CNq0C6uVTrRJuwTEkY23Vpq5Atwyq0QatdMwcFDT7CFJgJs1DiBR3MmHX0fXE4gnvLiJEFG0LXfR
+
+# Bearer token for the read API / chart page. Generate your own:
+#     openssl rand -hex 32
+API_TOKEN=
+
+# Read-only token: can fetch data but NOT trigger a collection. Deliberately
+# simple so it is shareable (dashboard, phone, family). Change it if you like.
+READ_TOKEN=1013

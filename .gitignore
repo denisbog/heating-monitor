@@ -1,0 +1,23 @@
+# Rust
+target/
+worker/target/
+
+# Python
+__pycache__/
+*.pyc
+
+# Local secrets — never commit
+credentials*
+.env
+*.gpg
+
+# Downloaded vendor bundles and capture logs (large)
+data/
+
+# Cloudflare / wrangler
+.wrangler/
+worker/.wrangler/
+worker/build/
+worker/.dev.vars
+
+node_modules/
