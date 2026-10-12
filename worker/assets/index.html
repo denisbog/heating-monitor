@@ -44,6 +44,8 @@
   button:hover:not(:disabled) { border-color: currentColor; }
   button:disabled { opacity: .4; cursor: default; }
   .bar { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-bottom: .75rem; }
+  .adminlink { margin-left: auto; font-size: .85rem; opacity: .6; }
+  .adminlink:hover { opacity: 1; }
   .seg { display: flex; }
   .seg button { border-radius: 0; border-left-width: 0; }
   .seg button:first-child { border-radius: 7px 0 0 7px; border-left-width: 1px; }
@@ -102,11 +104,14 @@
   </div>
   <button id="collect">Collect now</button>
   <button id="reload">Reload</button>
+  <a class="adminlink" href="/admin" title="Configure charts (admin token required)">Admin</a>
   <span id="status" class="sub"></span>
 </div>
 
 <div id="charts"></div>
 
+<!-- Collector internals: shown only for the admin token (see the whoami check in load()). -->
+<div id="advanced" hidden>
 <h2>Collector runs</h2>
 <table id="runs"><thead><tr>
   <th>Started</th><th>Status</th><th class="num">Devices</th><th class="num">Readings</th><th>Error</th>
@@ -118,6 +123,7 @@
     <th>Device</th><th>Metric</th><th class="num">Value</th><th>Unit</th><th>When</th>
   </tr></thead><tbody></tbody></table>
 </details>
+</div>
 
 <script>
 "use strict";
@@ -125,10 +131,17 @@ const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 const PALETTE = ["#4c8dff", "#ff8a3d", "#37c98b", "#e05c8a", "#b98cff", "#d9c02c", "#39b7c9", "#f2645a"];
+// One colour per metric *name*, shared by every chart and every device, so the
+// same measurement reads the same everywhere. Assigned on first use.
+const COLORS = new Map();
+const colorFor = (metric) => {
+  if (!COLORS.has(metric)) COLORS.set(metric, COLORS.size);
+  return PALETTE[COLORS.get(metric) % PALETTE.length];
+};
 // Metrics that are flags/noise rather than measurements worth a line.
 const SKIP = new Set(["online", "error_code", "error"]);
 
-const state = { range: 168 * 3600, devices: [], token: localStorage.getItem("apiToken") || "" };
+const state = { range: 168 * 3600, devices: [], config: null, admin: false, token: localStorage.getItem("apiToken") || "" };
 
 $("#token").value = state.token;
 
@@ -204,13 +217,13 @@ function groupByUnit(rows, daily) {
 // Chart
 // ---------------------------------------------------------------------------
 
-function chartCard(title, meta, series, unit, daily, win) {
+function chartCard(title, meta, series, unit, daily, win, kind = "line") {
   const card = document.createElement("div");
   card.className = "card";
   card.innerHTML = `<h3>${esc(title)}</h3><div class="meta">${esc(meta)}</div>
     <div class="plot"></div><div class="tip"></div><div class="legend"></div>`;
   const plot = card.querySelector(".plot");
-  const colors = new Map(series.map((s, i) => [s.name, PALETTE[i % PALETTE.length]]));
+  const colors = new Map(series.map((s) => [s.name, colorFor(s.key ?? s.name)]));
 
   const draw = () => {
     const W = Math.max(280, plot.clientWidth || 320);
@@ -278,16 +291,39 @@ function chartCard(title, meta, series, unit, daily, win) {
       svg.appendChild(tx);
     }
 
-    // series
-    for (const s of series) {
+    // series — line by default, optionally a filled area or grouped bars
+    const barW = Math.max(1.5, Math.min(14, (iw / Math.max(all.length, 1)) * 0.8 / Math.max(series.length, 1)));
+    // Bars hang from zero when the axis crosses it, otherwise from the floor.
+    const base = y0 <= 0 && y1 >= 0 ? Y(0) : P.t + ih;
+    series.forEach((s, si) => {
       const color = colors.get(s.name);
-      if (s.points.length === 1) {
+      if (kind === "bar") {
+        const dx = (si - (series.length - 1) / 2) * barW;
+        for (const p of s.points) {
+          const y = Y(p.y);
+          const r = document.createElementNS(ns, "rect");
+          r.setAttribute("x", (X(p.x) - barW / 2 + dx).toFixed(1));
+          r.setAttribute("y", Math.min(y, base).toFixed(1));
+          r.setAttribute("width", barW.toFixed(1));
+          r.setAttribute("height", Math.max(0.5, Math.abs(base - y)).toFixed(1));
+          r.setAttribute("fill", color);
+          svg.appendChild(r);
+        }
+      } else if (s.points.length === 1) {
         const c = document.createElementNS(ns, "circle");
         c.setAttribute("cx", X(s.points[0].x)); c.setAttribute("cy", Y(s.points[0].y));
         c.setAttribute("r", 3); c.setAttribute("fill", color);
         svg.appendChild(c);
       } else {
         const d = s.points.map((p, i) => `${i ? "L" : "M"}${X(p.x).toFixed(1)},${Y(p.y).toFixed(1)}`).join(" ");
+        if (kind === "area") {
+          const fill = document.createElementNS(ns, "path");
+          const last = s.points[s.points.length - 1];
+          fill.setAttribute("d", `${d} L${X(last.x).toFixed(1)},${base.toFixed(1)} L${X(s.points[0].x).toFixed(1)},${base.toFixed(1)} Z`);
+          fill.setAttribute("fill", color);
+          fill.setAttribute("opacity", "0.15");
+          svg.appendChild(fill);
+        }
         const path = document.createElementNS(ns, "path");
         path.setAttribute("d", d);
         path.setAttribute("fill", "none");
@@ -296,7 +332,7 @@ function chartCard(title, meta, series, unit, daily, win) {
         path.setAttribute("stroke-linejoin", "round");
         svg.appendChild(path);
       }
-    }
+    });
 
     // hover
     const cursor = document.createElementNS(ns, "line");
@@ -395,7 +431,7 @@ function chartCard(title, meta, series, unit, daily, win) {
 
 let draws = [];
 
-function render(perDevice, daily, win) {
+function renderAuto(perDevice, daily, win) {
   const root = $("#charts");
   root.innerHTML = "";
   draws = [];
@@ -424,7 +460,7 @@ function render(perDevice, daily, win) {
     const grid = document.createElement("div");
     grid.className = "grid";
     for (const [unit, metrics] of [...byUnit].sort((a, b) => a[0].localeCompare(b[0]))) {
-      const series = [...metrics].map(([name, points]) => ({ name, points }));
+      const series = [...metrics].map(([name, points]) => ({ name, key: name, points }));
       const title = unit || "state";
       const { card, draw } = chartCard(
         `${title} · ${label}`,
@@ -434,6 +470,7 @@ function render(perDevice, daily, win) {
         unit,
         daily,
         win,
+        "line",
       );
       grid.appendChild(card);
       draws.push(draw);
@@ -442,6 +479,66 @@ function render(perDevice, daily, win) {
     root.appendChild(wrap);
   }
 
+  draws.forEach((d) => d());
+}
+
+/// Render exactly the charts the admin configured: one card per entry, in
+/// order, with the devices and metrics the admin picked. A chart with no
+/// device plots every device that has the metric.
+function renderConfigured(cfg, perDevice, daily, win) {
+  const root = $("#charts");
+  root.innerHTML = "";
+  draws = [];
+
+  const byDevice = new Map(perDevice.map((p) => [p.device.id, p]));
+  const label = (id) => {
+    const d = byDevice.get(id)?.device;
+    return d ? d.name || d.external_id : id;
+  };
+
+  const grid = document.createElement("div");
+  grid.className = "grid";
+
+  for (const spec of cfg.charts) {
+    const ids = (spec.device ? [spec.device] : [...byDevice.keys()]).filter((id) => byDevice.has(id));
+    const series = [];
+    let unit = spec.unit || "";
+
+    // Walk the metrics in the admin's order so the legend and palette are stable.
+    for (const metric of spec.metrics) {
+      for (const id of ids) {
+        const points = [];
+        for (const r of byDevice.get(id).rows) {
+          if (r.metric !== metric) continue;
+          const y = daily ? r.avg : r.value;
+          if (y === null || y === undefined || !isFinite(y)) continue;
+          const x = daily ? Date.parse(r.day + "T00:00:00Z") : r.ts * 1000;
+          if (!isFinite(x)) continue;
+          if (!unit) unit = r.unit || "";
+          points.push({ x, y, label: daily ? r.day : fmtTime(r.ts) });
+        }
+        if (!points.length) continue;
+        points.sort((a, b) => a.x - b.x);
+        series.push({ name: ids.length > 1 ? `${metric} · ${label(id)}` : metric, key: metric, points });
+      }
+    }
+
+    const fallback = series.length ? series.map((s) => s.name).join(", ") : spec.metrics.join(", ");
+    const { card, draw } = chartCard(
+      spec.title || fallback,
+      `${series.length} series · ${daily ? "daily average" : "15-minute samples"}` +
+        (win ? ` · ${fmtRange(win)}` : ""),
+      series,
+      unit,
+      daily,
+      win,
+      spec.kind,
+    );
+    grid.appendChild(card);
+    draws.push(draw);
+  }
+
+  root.appendChild(grid);
   draws.forEach((d) => d());
 }
 
@@ -469,17 +566,34 @@ async function load() {
         : await api("/api/readings?" + new URLSearchParams({ ...Object.fromEntries(q), limit: 5000 }));
       perDevice.push({ device: d, rows });
     }
-    render(perDevice, daily, win);
+    state.config = await api("/api/config").catch(() => null);
+    const cfg = state.config;
+    if (cfg?.charts?.length) {
+      if (cfg.title) $("#subtitle").textContent = cfg.title;
+      renderConfigured(cfg, perDevice, daily, win);
+    } else {
+      renderAuto(perDevice, daily, win);
+    }
 
-    const [latest, runs] = await Promise.all([api("/api/latest"), api("/api/runs?limit=20")]);
-    $("#latest tbody").innerHTML = latest.map((r) => `<tr>
+    // Collector internals are admin-only: hide them (and skip fetching them)
+    // for the shareable read-only token.
+    const who = await api("/api/whoami").catch(() => null);
+    state.admin = !!who?.admin;
+    $("#advanced").hidden = !state.admin;
+    if (state.admin) {
+      const [latest, runs] = await Promise.all([api("/api/latest"), api("/api/runs?limit=20")]);
+      $("#latest tbody").innerHTML = latest.map((r) => `<tr>
         <td>${esc(r.device_id)}</td><td>${esc(r.metric)}</td>
         <td class="num">${fmtNum(r.value)}</td><td>${esc(r.unit)}</td>
         <td>${esc(fmtTime(r.ts))}</td></tr>`).join("");
-    $("#runs tbody").innerHTML = runs.map((r) => `<tr>
+      $("#runs tbody").innerHTML = runs.map((r) => `<tr>
         <td>${esc(fmtTime(r.started_at))}</td><td>${esc(r.status)}</td>
         <td class="num">${r.devices_seen ?? 0}</td><td class="num">${r.readings_written ?? 0}</td>
         <td class="${r.error ? "err" : ""}">${esc(r.error)}</td></tr>`).join("");
+    } else {
+      $("#latest tbody").innerHTML = "";
+      $("#runs tbody").innerHTML = "";
+    }
 
     const total = perDevice.reduce((n, p) => n + p.rows.length, 0);
     setStatus(`Loaded ${devices.length} devices, ${total} points.`, "ok");

@@ -44,12 +44,16 @@ wrangler deploy
 ```
 
 Then open the Worker URL and paste the read token. It is installable as a PWA.
+The admin token also unlocks `/admin`, where you choose how many charts the
+dashboard shows and what each one plots (`GET`/`PUT /api/config`, stored in the
+`settings` table). A read-only token still sees the charts, but the collector-run
+log and the raw latest-values table are admin-only.
 
 ### Two access levels
 
 | token | secret | can |
 |---|---|---|
-| `API_TOKEN` | long random | read **and** `POST /api/collect` |
+| `API_TOKEN` | long random | read, `POST /api/collect`, **and the `/admin` chart editor** |
 | `READ_TOKEN` | short and shareable | read only |
 
 ## Notes and caveats

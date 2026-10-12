@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Heating monitor · Admin</title>
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f8fafc" media="(prefers-color-scheme: light)">
+<style>
+  :root { color-scheme: light dark; --line: #8883; --muted: #8888; --err: #c33; --ok: #2a2; }
+  * { box-sizing: border-box; }
+  body {
+    font: 14px/1.5 system-ui, -apple-system, sans-serif;
+    margin: 0 auto; max-width: 60rem;
+    padding: calc(1.5rem + env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right))
+             calc(4rem + env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+  }
+  h1 { font-size: 1.3rem; margin: 0; }
+  h2 { font-size: .95rem; text-transform: uppercase; letter-spacing: .06em; opacity: .6; margin: 2rem 0 .75rem; }
+  .sub { opacity: .6; }
+  a { color: inherit; }
+  input, select, button {
+    font: inherit; padding: .4rem .6rem; border-radius: 7px;
+    border: 1px solid var(--line); background: transparent; color: inherit; max-width: 100%;
+  }
+  button { cursor: pointer; white-space: nowrap; }
+  button:hover:not(:disabled) { border-color: currentColor; }
+  button:disabled { opacity: .4; cursor: default; }
+  .bar { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin: .75rem 0; }
+  .spacer { flex: 1; }
+  form.auth { display: flex; gap: .5rem; margin: 1rem 0 .5rem; }
+  form.auth input { flex: 1; min-width: 0; }
+  .err { color: var(--err); }
+  .ok { color: var(--ok); }
+  .empty { opacity: .5; padding: 1.5rem 0; text-align: center; font-size: .85rem; }
+
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: .75rem .9rem; margin-bottom: .9rem; }
+  .card > header { display: flex; gap: .4rem; align-items: center; margin-bottom: .6rem; }
+  .card > header .ctitle { flex: 1; min-width: 8rem; font-weight: 600; }
+  .card > header .idx { opacity: .5; font-variant-numeric: tabular-nums; }
+  .fields { display: flex; gap: .6rem; flex-wrap: wrap; }
+  .fields label { display: flex; flex-direction: column; gap: .15rem; font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; opacity: .7; }
+  .fields select, .fields input { font-size: .9rem; }
+  .chips { display: flex; flex-wrap: wrap; gap: .3rem; margin: .6rem 0 0; min-height: 1.4rem; }
+  .chip { display: inline-flex; align-items: center; gap: .3rem; border: 1px solid var(--line); border-radius: 999px; padding: .1rem .3rem .1rem .6rem; font-size: .82rem; }
+  .chip button { border: 0; padding: 0 .35rem; line-height: 1.2; opacity: .6; }
+  .chip button:hover { opacity: 1; }
+  .pick { display: flex; gap: .4rem; flex-wrap: wrap; align-items: center; margin-top: .5rem; }
+  .pick select, .pick input { flex: 1 1 12rem; }
+  .hint { font-size: .78rem; opacity: .55; margin-top: .5rem; }
+  details { margin-top: 1.5rem; }
+  summary { cursor: pointer; opacity: .6; font-size: .85rem; }
+  pre { overflow: auto; font-size: .78rem; border: 1px solid var(--line); border-radius: 8px; padding: .6rem; }
+</style>
+</head>
+<body>
+<h1>Chart admin</h1>
+<p class="sub">Choose how many charts the dashboard shows and what each one plots.
+Changes are stored server-side and apply to every client.
+An <strong>admin</strong> token (<code>API_TOKEN</code>) is required to save.</p>
+
+<form class="auth" id="auth">
+  <input id="token" type="password" placeholder="Admin token (API_TOKEN)" autocomplete="off" spellcheck="false">
+  <button>Unlock</button>
+</form>
+<p class="sub" id="status"></p>
+
+<div class="bar">
+  <button id="add" disabled>+ Add chart</button>
+  <button id="save" disabled>Save layout</button>
+  <button id="reload">Reload</button>
+  <button id="clear" disabled title="Remove all custom charts and fall back to auto charts">Clear layout</button>
+  <span class="spacer"></span>
+  <a href="/">View dashboard &rarr;</a>
+</div>
+<div class="bar">
+  <label class="sub" style="display:flex;gap:.5rem;align-items:center">Dashboard title
+    <input id="layoutTitle" placeholder="optional heading" disabled style="min-width:16rem">
+  </label>
+</div>
+
+<div id="charts"></div>
+
+<details>
+  <summary>Payload that will be saved</summary>
+  <pre id="preview"></pre>
+</details>
+
+<datalist id="allmetrics"></datalist>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+let token = localStorage.getItem("adminToken") || localStorage.getItem("apiToken") || "";
+let admin = false;
+let devices = [];
+let metricsByDevice = new Map();   // device id -> [{metric, unit}]
+let allMetricNames = [];           // for the datalist
+let cfg = { version: 1, title: "", charts: [] };
+
+$("#token").value = token;
+
+function setStatus(msg, cls = "sub") {
+  const el = $("#status");
+  el.textContent = msg;
+  el.className = cls;
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    method: opts.method || "GET",
+    headers: { authorization: "Bearer " + token, ...(opts.headers || {}) },
+    body: opts.body,
+  });
+  if (!r.ok) {
+    const text = await r.text().catch(() => "");
+    throw new Error((text || "HTTP " + r.status) + (text ? " (HTTP " + r.status + ")" : ""));
+  }
+  return r.json();
+}
+
+// --- model -----------------------------------------------------------------
+
+function normChart(c) {
+  return {
+    title: String(c?.title || ""),
+    device: String(c?.device || ""),
+    metrics: Array.isArray(c?.metrics) ? c.metrics.map(String) : [],
+    unit: String(c?.unit || ""),
+    kind: ["line", "area", "bar"].includes(c?.kind) ? c.kind : "line",
+  };
+}
+function newChart() {
+  const opts = metricOptions("");
+  return { title: "", device: "", metrics: opts.length ? [opts[0].metric] : [], unit: "", kind: "line" };
+}
+
+function buildMetricIndex(rows) {
+  metricsByDevice = new Map();
+  const names = new Set();
+  for (const r of rows || []) {
+    if (!metricsByDevice.has(r.device_id)) metricsByDevice.set(r.device_id, new Map());
+    const m = metricsByDevice.get(r.device_id);
+    if (!m.has(r.metric)) m.set(r.metric, r.unit || "");
+    names.add(r.metric);
+  }
+  allMetricNames = [...names].sort();
+  $("#allmetrics").innerHTML = allMetricNames.map((n) => `<option value="${esc(n)}">`).join("");
+}
+
+/// Available metrics for a device id, or the union across devices for "".
+function metricOptions(deviceId) {
+  const seen = new Map();
+  const ids = deviceId ? [deviceId] : [...metricsByDevice.keys()];
+  for (const id of ids) {
+    for (const [metric, unit] of metricsByDevice.get(id) || []) {
+      if (!seen.has(metric)) seen.set(metric, unit);
+    }
+  }
+  return [...seen].sort((a, b) => a[0].localeCompare(b[0])).map(([metric, unit]) => ({ metric, unit }));
+}
+
+function deviceLabel(id) {
+  const d = devices.find((x) => x.id === id);
+  return d ? (d.name || d.external_id) : id;
+}
+
+// --- render ----------------------------------------------------------------
+
+function render() {
+  $("#layoutTitle").value = cfg.title || "";
+  const root = $("#charts");
+  root.innerHTML = "";
+
+  if (!cfg.charts.length) {
+    root.innerHTML = '<div class="empty">No custom layout yet — the dashboard uses automatic charts. Add one to take over.</div>';
+  }
+
+  cfg.charts.forEach((c, i) => root.appendChild(chartEditor(c, i)));
+  updatePreview();
+}
+
+function chartEditor(c, i) {
+  const el = document.createElement("div");
+  el.className = "card";
+  el.dataset.i = i;
+
+  const opts = metricOptions(c.device);
+  const optionHtml = (sel) => opts.map((o) =>
+    `<option value="${esc(o.metric)}"${o.metric === sel ? " selected" : ""}>${esc(o.metric)}${o.unit ? " (" + esc(o.unit) + ")" : ""}</option>`
+  ).join("");
+
+  el.innerHTML = `
+    <header>
+      <span class="idx">#${i + 1}</span>
+      <input class="ctitle" placeholder="Chart title (optional)" value="${esc(c.title)}">
+      <button data-act="up" title="Move up"${i === 0 ? " disabled" : ""}>↑</button>
+      <button data-act="down" title="Move down"${i === cfg.charts.length - 1 ? " disabled" : ""}>↓</button>
+      <button data-act="del" title="Remove chart">✕</button>
+    </header>
+    <div class="fields">
+      <label>Device
+        <select class="cdevice">
+          <option value=""${c.device ? "" : " selected"}>All devices</option>
+          ${devices.map((d) => `<option value="${esc(d.id)}"${d.id === c.device ? " selected" : ""}>${esc(d.name || d.external_id)} · ${esc(d.provider)}</option>`).join("")}
+        </select>
+      </label>
+      <label>Type
+        <select class="ckind">
+          ${["line", "area", "bar"].map((k) => `<option value="${k}"${k === c.kind ? " selected" : ""}>${k}</option>`).join("")}
+        </select>
+      </label>
+      <label>Unit
+        <input class="cunit" placeholder="auto" value="${esc(c.unit)}" style="width:7rem">
+      </label>
+    </div>
+    <div class="chips">
+      ${c.metrics.map((m) => `<span class="chip">${esc(m)}<button data-act="chipdel" data-metric="${esc(m)}" title="Remove">×</button></span>`).join("")}
+      ${c.metrics.length ? "" : '<span class="sub" style="font-size:.82rem">no metrics selected yet</span>'}
+    </div>
+    <div class="pick">
+      <select class="cmetric"><option value="">— metric —</option>${optionHtml("")}</select>
+      <button data-act="addmetric">Add metric</button>
+      <input class="ccustom" list="allmetrics" placeholder="or type any metric name">
+      <button data-act="addcustom">Add custom</button>
+    </div>
+    <p class="hint">${c.device ? "Plotting " + esc(deviceLabel(c.device)) : "Plotting every device that has the metric"}
+      · ${c.metrics.length} series per device.</p>
+  `;
+  return el;
+}
+
+function updatePreview() {
+  $("#preview").textContent = JSON.stringify(cfg, null, 2);
+}
+
+// --- events ----------------------------------------------------------------
+
+$("#auth").addEventListener("submit", (e) => {
+  e.preventDefault();
+  token = $("#token").value.trim();
+  localStorage.setItem("adminToken", token);
+  load();
+});
+
+$("#layoutTitle").addEventListener("input", () => { cfg.title = $("#layoutTitle").value; updatePreview(); });
+
+$("#add").addEventListener("click", () => { cfg.charts.push(newChart()); render(); });
+
+$("#reload").addEventListener("click", load);
+
+$("#save").addEventListener("click", async () => {
+  $("#save").disabled = true;
+  setStatus("Saving…");
+  try {
+    const res = await api("/api/config", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(cfg),
+    });
+    setStatus(`Saved — ${res.charts} chart(s) now drive the dashboard.`, "ok");
+  } catch (e) {
+    setStatus("Save failed: " + (e.message || e), "err");
+  } finally {
+    $("#save").disabled = !admin;
+  }
+});
+
+$("#clear").addEventListener("click", async () => {
+  if (!confirm("Remove all custom charts and go back to automatic charts?")) return;
+  cfg = { version: 1, title: cfg.title, charts: [] };
+  render();
+  $("#save").click();
+});
+
+const root = $("#charts");
+
+root.addEventListener("input", (e) => {
+  const card = e.target.closest("[data-i]");
+  if (!card) return;
+  const c = cfg.charts[Number(card.dataset.i)];
+  if (e.target.classList.contains("ctitle")) { c.title = e.target.value; updatePreview(); }
+  if (e.target.classList.contains("cunit")) { c.unit = e.target.value; updatePreview(); }
+});
+
+root.addEventListener("change", (e) => {
+  const card = e.target.closest("[data-i]");
+  if (!card) return;
+  const c = cfg.charts[Number(card.dataset.i)];
+  if (e.target.classList.contains("cdevice")) { c.device = e.target.value; render(); }
+  if (e.target.classList.contains("ckind")) { c.kind = e.target.value; updatePreview(); }
+});
+
+root.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-act]");
+  if (!btn) return;
+  const card = btn.closest("[data-i]");
+  const i = Number(card.dataset.i);
+  const c = cfg.charts[i];
+  switch (btn.dataset.act) {
+    case "up":
+      if (i > 0) { cfg.charts.splice(i - 1, 0, cfg.charts.splice(i, 1)[0]); render(); }
+      break;
+    case "down":
+      if (i < cfg.charts.length - 1) { cfg.charts.splice(i + 1, 0, cfg.charts.splice(i, 1)[0]); render(); }
+      break;
+    case "del":
+      cfg.charts.splice(i, 1); render();
+      break;
+    case "chipdel":
+      c.metrics = c.metrics.filter((m) => m !== btn.dataset.metric); render();
+      break;
+    case "addmetric": {
+      const sel = card.querySelector(".cmetric");
+      if (sel.value && !c.metrics.includes(sel.value)) { c.metrics.push(sel.value); render(); }
+      break;
+    }
+    case "addcustom": {
+      const inp = card.querySelector(".ccustom");
+      const val = inp.value.trim();
+      if (val && !c.metrics.includes(val)) { c.metrics.push(val); render(); }
+      break;
+    }
+  }
+});
+
+// --- load ------------------------------------------------------------------
+
+function setAdmin(on) {
+  admin = on;
+  for (const id of ["#add", "#save", "#clear", "#layoutTitle"]) $(id).disabled = !on;
+}
+
+async function load() {
+  if (!token) { setAdmin(false); setStatus("Enter the admin token to configure charts."); return; }
+  setStatus("Loading…");
+  try {
+    const who = await api("/api/whoami");
+    setAdmin(!!who.admin);
+    if (!who.admin) {
+      setStatus("This token is read-only. Saving needs the admin token (API_TOKEN).", "err");
+      return;
+    }
+
+    const [devs, metrics, stored] = await Promise.all([
+      api("/api/devices"),
+      api("/api/metrics"),
+      api("/api/config"),
+    ]);
+    devices = devs;
+    buildMetricIndex(metrics);
+    cfg = {
+      version: 1,
+      title: String(stored?.title || ""),
+      charts: Array.isArray(stored?.charts) ? stored.charts.map(normChart) : [],
+    };
+    render();
+    setStatus(`Admin unlocked · ${devices.length} devices · ${cfg.charts.length} configured charts.`, "ok");
+  } catch (e) {
+    setAdmin(false);
+    setStatus(String(e.message || e), "err");
+  }
+}
+
+load();
+</script>
+</body>
+</html>

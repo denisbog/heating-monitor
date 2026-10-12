@@ -206,6 +206,38 @@ pub async fn clear_token(db: &D1Database, provider: &str) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Settings (dashboard layout)
+// ---------------------------------------------------------------------------
+
+/// Read a settings value, `None` when the key was never written.
+pub async fn load_setting(db: &D1Database, key: &str) -> Result<Option<String>> {
+    #[derive(Debug, Deserialize)]
+    struct Row {
+        value: String,
+    }
+    let row = db
+        .prepare("SELECT value FROM settings WHERE key = ?")
+        .bind(&[s(key)])?
+        .first::<Row>(None)
+        .await?;
+    Ok(row.map(|r| r.value))
+}
+
+/// Insert or replace a settings value.
+pub async fn save_setting(db: &D1Database, key: &str, value: &str) -> Result<()> {
+    db.prepare(
+        "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET
+           value      = excluded.value,
+           updated_at = excluded.updated_at",
+    )
+    .bind(&[s(key), s(value), n(now_secs() as f64)])?
+    .run()
+    .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Reads
 // ---------------------------------------------------------------------------
 
@@ -251,6 +283,17 @@ pub struct RunRow {
     pub devices_seen: Option<i64>,
     pub readings_written: Option<i64>,
     pub error: Option<String>,
+}
+
+/// One (device, metric, unit) series that exists in `readings`. Feeds the admin
+/// page's metric picker, so it shows real metrics rather than a hard-coded list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricRow {
+    pub device_id: String,
+    pub metric: String,
+    pub unit: Option<String>,
+    pub n: i64,
+    pub last_ts: i64,
 }
 
 pub async fn devices(db: &D1Database) -> Result<Vec<DeviceRow>> {
@@ -343,4 +386,22 @@ pub async fn runs(db: &D1Database, limit: i64) -> Result<Vec<RunRow>> {
         .all()
         .await?;
     res.results::<RunRow>()
+}
+
+/// Every distinct metric we have ever stored, per device, newest first.
+pub async fn metrics(db: &D1Database) -> Result<Vec<MetricRow>> {
+    let res = db
+        .prepare(
+            "SELECT device_id,
+                    metric,
+                    unit,
+                    COUNT(*) AS n,
+                    MAX(ts)  AS last_ts
+               FROM readings
+              GROUP BY device_id, metric, unit
+              ORDER BY device_id, metric",
+        )
+        .all()
+        .await?;
+    res.results::<MetricRow>()
 }

@@ -10,6 +10,7 @@
 //!   API_TOKEN
 
 pub mod cameconnect;
+pub mod config;
 pub mod db;
 pub mod http;
 pub mod iletcomfort;
@@ -282,6 +283,48 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             )
             .await?;
             Response::from_json(&rows)
+        })
+        // Dashboard layout: readable by any token (the chart page renders it),
+        // writable by the admin token only.
+        .get_async("/api/config", |req, ctx| async move {
+            if !authorized(&req, &ctx.env) {
+                return Response::error("unauthorized", 401);
+            }
+            let db = ctx.env.d1("DB")?;
+            let cfg = db::load_setting(&db, config::SETTINGS_KEY)
+                .await?
+                .and_then(|raw| serde_json::from_str::<config::Dashboard>(&raw).ok())
+                .unwrap_or_default();
+            Response::from_json(&cfg)
+        })
+        .put_async("/api/config", |req, ctx| async move {
+            if !authorized_admin(&req, &ctx.env) {
+                return Response::error("read-only token: admin access required", 403);
+            }
+            let mut req = req;
+            let cfg = match req.json::<config::Dashboard>().await {
+                Ok(c) => c.sanitize(),
+                Err(e) => return Response::error(format!("invalid config: {e}"), 400),
+            };
+            let db = ctx.env.d1("DB")?;
+            let json = serde_json::to_string(&cfg).map_err(|e| Error::RustError(e.to_string()))?;
+            db::save_setting(&db, config::SETTINGS_KEY, &json).await?;
+            Response::from_json(&serde_json::json!({"ok": true, "charts": cfg.charts.len()}))
+        })
+        // Every (device, metric, unit) that exists — feeds the admin picker.
+        .get_async("/api/metrics", |req, ctx| async move {
+            if !authorized(&req, &ctx.env) {
+                return Response::error("unauthorized", 401);
+            }
+            let db = ctx.env.d1("DB")?;
+            Response::from_json(&db::metrics(&db).await?)
+        })
+        // Lets the admin page tell "admin token" from "read-only token".
+        .get_async("/api/whoami", |req, ctx| async move {
+            Response::from_json(&serde_json::json!({
+                "read": authorized(&req, &ctx.env),
+                "admin": authorized_admin(&req, &ctx.env),
+            }))
         })
         // Manual trigger: run a collection now instead of waiting for cron.
         .post_async("/api/collect", |req, ctx| async move {

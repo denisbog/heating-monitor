@@ -55,3 +55,12 @@ CREATE TABLE IF NOT EXISTS tokens (
     expires_at  INTEGER,
     extra       TEXT
 );
+
+-- Small key/value store for UI state (currently the dashboard chart layout,
+-- key 'dashboard'). Keeping it server-side means every client — and every
+-- browser — shows the same admin-configured page.
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
