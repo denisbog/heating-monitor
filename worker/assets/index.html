@@ -65,15 +65,6 @@
   .gl { stroke: var(--line); stroke-width: 1; }
   .axis { fill: var(--muted); font-size: 10px; }
   .cursor { stroke: currentColor; stroke-width: 1; opacity: .45; }
-  .tip {
-    position: absolute; pointer-events: none; z-index: 5; font-size: .78rem;
-    background: canvas; border: 1px solid var(--line); border-radius: 7px;
-    padding: .35rem .5rem; box-shadow: 0 2px 10px #0002; white-space: nowrap;
-    font-variant-numeric: tabular-nums; opacity: 0; transition: opacity .08s;
-  }
-  .tip table { border-collapse: collapse; }
-  .tip td { padding: 0 .35rem 0 0; }
-  .tip td:last-child { padding-right: 0; text-align: right; }
 
   table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
   th, td { text-align: left; padding: .28rem .5rem; border-bottom: 1px solid var(--line); }
@@ -221,14 +212,29 @@ function chartCard(title, meta, series, unit, daily, win, kind = "line") {
   const card = document.createElement("div");
   card.className = "card";
   card.innerHTML = `<h3>${esc(title)}</h3><div class="meta">${esc(meta)}</div>
-    <div class="plot"></div><div class="tip"></div><div class="legend"></div>`;
+    <div class="plot"></div><div class="legend"></div>`;
   const plot = card.querySelector(".plot");
   const colors = new Map(series.map((s) => [s.name, colorFor(s.key ?? s.name)]));
+  // An explicit unit override wins; otherwise each series keeps its own unit.
+  // The axis is labelled only when one unit covers the whole chart.
+  const unitOf = (s) => unit || s.unit || "";
+  const units = [...new Set(series.map(unitOf))];
+  const cardUnit = units.length === 1 ? units[0] : "";
+  // Selecting a point moves the read-out from a tooltip into the legend: the
+  // legend shows the latest value at rest, and the hovered value while pointing.
+  const legend = card.querySelector(".legend");
+  let legendValues = [];
+  let readout = null;
+  const resetLegend = () =>
+    legendValues.forEach((b, i) => {
+      const pts = series[i].points;
+      b.textContent = pts.length ? fmtNum(pts[pts.length - 1].y) : "—";
+    });
 
   const draw = () => {
     const W = Math.max(280, plot.clientWidth || 320);
     plot.innerHTML = "";
-    const H = 190, P = { t: 10, r: 12, b: 24, l: 46 };
+    const H = 190, P = { t: 22, r: 12, b: 24, l: 46 };
     const iw = W - P.l - P.r, ih = H - P.t - P.b;
 
     const all = series.flatMap((s) => s.points);
@@ -257,6 +263,22 @@ function chartCard(title, meta, series, unit, daily, win, kind = "line") {
     const svg = document.createElementNS(ns, "svg");
     svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
     svg.setAttribute("height", H);
+    // Axis unit, shown when a single unit applies to every series.
+    if (cardUnit) {
+      const ut = document.createElementNS(ns, "text");
+      ut.setAttribute("class", "axis");
+      ut.setAttribute("x", 4);
+      ut.setAttribute("y", 12);
+      ut.textContent = cardUnit;
+      svg.appendChild(ut);
+    }
+    // Time of the selected sample, shown above the plot instead of in a tooltip.
+    readout = document.createElementNS(ns, "text");
+    readout.setAttribute("class", "axis");
+    readout.setAttribute("x", W - P.r);
+    readout.setAttribute("y", 12);
+    readout.setAttribute("text-anchor", "end");
+    svg.appendChild(readout);
 
     // horizontal gridlines + y labels
     for (let i = 0; i <= 4; i++) {
@@ -356,56 +378,43 @@ function chartCard(title, meta, series, unit, daily, win, kind = "line") {
     hit.setAttribute("fill", "transparent");
     svg.appendChild(hit);
 
-    const tip = card.querySelector(".tip");
-
     const show = (ev) => {
       const rect = svg.getBoundingClientRect();
       const px = ((ev.clientX ?? ev.touches?.[0]?.clientX ?? 0) - rect.left) * (W / rect.width);
       const t = x0 + ((px - P.l) / iw) * (x1 - x0);
       let any = false;
-      tip.innerHTML = "";
-      const tbl = document.createElement("table");
 
       series.forEach((s, i) => {
         let best = null;
         for (const p of s.points) if (!best || Math.abs(p.x - t) < Math.abs(best.x - t)) best = p;
         const d = dots[i];
-        if (!best) { d.style.display = "none"; return; }
+        const b = legendValues[i];
+        if (!best) { d.style.display = "none"; if (b) b.textContent = "—"; return; }
         any = true;
         d.style.display = "";
         d.setAttribute("cx", X(best.x)); d.setAttribute("cy", Y(best.y));
         d.setAttribute("stroke", colors.get(s.name));
-        const tr = document.createElement("tr");
-        tr.innerHTML = `<td><span class="swatch" style="background:${colors.get(s.name)};display:inline-block"></span></td>
-                        <td>${esc(s.name)}</td><td>${fmtNum(best.y)} ${esc(unit)}</td>`;
-        tbl.appendChild(tr);
+        if (b) b.textContent = fmtNum(best.y);
       });
 
-      if (!any) { tip.style.opacity = "0"; cursor.style.display = "none"; return; }
+      if (!any) { cursor.style.display = "none"; readout.textContent = ""; return; }
 
-      // nearest sample time, as the tooltip heading
+      // The values live in the legend; only the sample time is annotated here.
       let anchor = null;
       for (const s of series) for (const p of s.points)
         if (!anchor || Math.abs(p.x - t) < Math.abs(anchor.x - t)) anchor = p;
-      const head = document.createElement("div");
-      head.style.opacity = ".6";
-      head.textContent = anchor.label;
-      tip.innerHTML = "";
-      tip.append(head, tbl);
-      tip.style.opacity = "1";
+      readout.textContent = anchor.label;
 
       const cx = X(anchor.x);
       cursor.style.display = "";
       cursor.setAttribute("x1", cx); cursor.setAttribute("x2", cx);
-      const left = Math.min(Math.max((cx / W) * rect.width - 60, 0), rect.width - 130);
-      tip.style.left = left + "px";
-      tip.style.top = P.t + "px";
     };
 
     const hide = () => {
-      tip.style.opacity = "0";
       cursor.style.display = "none";
       dots.forEach((d) => (d.style.display = "none"));
+      readout.textContent = "";
+      resetLegend();
     };
 
     svg.addEventListener("mousemove", show);
@@ -415,12 +424,12 @@ function chartCard(title, meta, series, unit, daily, win, kind = "line") {
     plot.appendChild(svg);
   };
 
-  const legend = card.querySelector(".legend");
   legend.innerHTML = series.map((s) => {
     const last = s.points[s.points.length - 1];
     return `<span><i class="swatch" style="background:${colors.get(s.name)}"></i>${esc(s.name)}
-            <b>${last ? fmtNum(last.y) : "—"}</b></span>`;
+            <b>${last ? fmtNum(last.y) : "—"}</b>${unitOf(s) ? " " + esc(unitOf(s)) : ""}</span>`;
   }).join("");
+  legendValues = [...legend.querySelectorAll("b")];
 
   return { card, draw };
 }
@@ -460,7 +469,7 @@ function renderAuto(perDevice, daily, win) {
     const grid = document.createElement("div");
     grid.className = "grid";
     for (const [unit, metrics] of [...byUnit].sort((a, b) => a[0].localeCompare(b[0]))) {
-      const series = [...metrics].map(([name, points]) => ({ name, key: name, points }));
+      const series = [...metrics].map(([name, points]) => ({ name, key: name, points, unit }));
       const title = unit || "state";
       const { card, draw } = chartCard(
         `${title} · ${label}`,
@@ -502,26 +511,31 @@ function renderConfigured(cfg, perDevice, daily, win) {
   for (const spec of cfg.charts) {
     const ids = (spec.device ? [spec.device] : [...byDevice.keys()]).filter((id) => byDevice.has(id));
     const series = [];
-    let unit = spec.unit || "";
 
     // Walk the metrics in the admin's order so the legend and palette are stable.
     for (const metric of spec.metrics) {
       for (const id of ids) {
         const points = [];
+        let sUnit = "";
         for (const r of byDevice.get(id).rows) {
           if (r.metric !== metric) continue;
           const y = daily ? r.avg : r.value;
           if (y === null || y === undefined || !isFinite(y)) continue;
           const x = daily ? Date.parse(r.day + "T00:00:00Z") : r.ts * 1000;
           if (!isFinite(x)) continue;
-          if (!unit) unit = r.unit || "";
+          if (!sUnit) sUnit = r.unit || "";
           points.push({ x, y, label: daily ? r.day : fmtTime(r.ts) });
         }
         if (!points.length) continue;
         points.sort((a, b) => a.x - b.x);
-        series.push({ name: ids.length > 1 ? `${metric} · ${label(id)}` : metric, key: metric, points });
+        series.push({ name: ids.length > 1 ? `${metric} · ${label(id)}` : metric, key: metric, points, unit: sUnit });
       }
     }
+
+    // A chart-wide unit only holds when every series agrees on one; on a mixed
+    // chart each series carries its own unit into the legend.
+    const units = [...new Set(series.map((s) => s.unit || ""))];
+    const unit = spec.unit || (units.length === 1 ? units[0] : "");
 
     const fallback = series.length ? series.map((s) => s.name).join(", ") : spec.metrics.join(", ");
     const { card, draw } = chartCard(
