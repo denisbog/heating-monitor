@@ -173,7 +173,23 @@ getAllInfoList.request({ host: oemRequestHost, params: { sn, type, startTime, en
 Note: `energyInfoListDTOS` samples carry the produced heat in **`allEnergyProduce`**, not in
 `value`. Parsing them with a generic `value`-looking helper produces no rows at all.
 
-Group `type` values seen: `heat`, `cool`, `tbh`, `ibh`, `others`.
+`electricityInfoDTOS` group `type` values and how the app labels them:
+
+| type | app label | meaning |
+|---|---|---|
+| `all` | ALL | total consumption; live data shows it equal to the sum of the other groups |
+| `heat` | Heating | space heating |
+| `cool` | Cooling | space cooling |
+| `dhw` | DHW | domestic hot water |
+| `others` | Others | catch-all bucket, which is where standby/auxiliary consumption lands |
+| `ibh` | IBH | indoor/integrated backup heater |
+| `tbh` | TBH | DHW-tank backup heater |
+
+The app's hourly electricity tabs are `all`, `heat`, `cool`, `dhw`, `others`; it filters
+`ibh` and `tbh` out of the stacked chart and pie, but they are real API rows. The collector
+stores every group, so the extra two are available if wanted.
+
+`energyInfoListDTOS` and `copInfoListDTOS` only carry `heat`, `cool`, `dhw` and `all`.
 
 Verified live for 2026-10-11 (10 hourly samples 09:00–19:00):
 ```

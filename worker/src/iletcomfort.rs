@@ -474,6 +474,11 @@ impl Client {
         if let Some(arr) = d.get("temp4InfoListDTOS").and_then(|x| x.as_array()) {
             push_samples(&mut out, id, "ambient_t4", "", arr, "°C", "value");
         }
+        // Same shape the app reads: groups are keyed by `type` — `all`,
+        // `heat`, `cool`, `dhw`, `others`, `ibh`, `tbh`. `all` is the total,
+        // `others` is the catch-all bucket where standby/auxiliary consumption
+        // lands, and ibh/tbh are the two electric backup heaters. The app
+        // hides ibh/tbh in its chart, but they are real API rows, so keep them.
         // Grouped by usage type.
         if let Some(arr) = d.get("electricityInfoDTOS").and_then(|x| x.as_array()) {
             push_grouped(&mut out, id, "elec_hourly", "electricityInfoListDTOS", arr, "kWh", "value");
