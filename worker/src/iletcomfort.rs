@@ -295,20 +295,48 @@ impl Client {
 
     /// POST to the energy statistics API on the iBUILDING platform.
     async fn energy(&self, path: &str, mut body: Value) -> Result<Value> {
-        let auth = format!("Bearer {}", self.token);
+        // iBUILDING needs **both** the raw Dollin token in its own
+        // `accessToken` header and the v1 HMAC scheme used by the rest of the
+        // Dollin API (prefix `btri`). A plain `Authorization: Bearer` is
+        // ignored (`3010: The token is empty`), and accessToken without a
+        // valid `sign` answers `3014` — either way every energy metric was
+        // silently dropped from 2026-10-30 onwards.
         // The app always tags requests with its own name and the device id.
         if let Value::Object(ref mut m) = body {
             m.insert("app".into(), json!("iLetComfort"));
         }
         let json_body = serde_json::to_string(&body).map_err(|e| Error::RustError(e.to_string()))?;
+
+        // `random` starts with the 14-character UTC `YYYYMMDDHHMMSS` stamp, so
+        // the same value feeds both headers (exactly like the app).
+        let (signature, random) = sign_v1(&json_body, false);
+        let stamp = random.get(..14).unwrap_or(random.as_str());
+        let deviceid = hex::encode(&Sha256::digest(format!("ilet-{}", Date::now()).as_bytes())[0..16])
+            .to_uppercase();
+        let rid = reqid();
         let headers = [
-            ("authorization", auth.as_str()),
+            ("accessToken", self.token.as_str()),
+            ("random", random.as_str()),
+            ("src", "20"),
+            ("appid", APP_ID),
             ("language", "en_US"),
+            ("clienttype", "2"),
+            ("appvnum", APPNUM),
+            ("stamp", stamp),
+            ("deviceid", deviceid.as_str()),
+            ("sign", signature.as_str()),
+            ("reqid", rid.as_str()),
         ];
         let url = format!("{}/api/apps-oem{path}", energy_base(&self.region));
         let (status, text) = post_json(&url, &headers, &json_body).await?;
         let v: Value = serde_json::from_str(&text)
             .map_err(|e| Error::RustError(format!("energy {path} {status}: bad json: {e}")))?;
+        if v["success"].as_bool() == Some(false) {
+            let code = v["errorCode"].as_i64().unwrap_or_default();
+            let msg = v["errorMsg"].as_str().unwrap_or("");
+            console_warn!("energy {path}: code={code} msg={msg}");
+            return Err(Error::RustError(format!("energy {path}: code={code} msg={msg}")));
+        }
         Ok(v)
     }
 
@@ -378,11 +406,12 @@ impl Client {
         // --- energy statistics -------------------------------------------------
         if let Ok(v) = self.energy_stats("/v3/energy/getTotalDetail", &app.sn).await {
             if let Some(d) = v["data"].as_object() {
-                // cumulative totals carry their own period in statisticalTime
-                let ts_start = parse_day(&d["startTime"]);
-                let ts = ts_start.unwrap_or(now);
+                // These are current cumulative totals, not a point in the
+                // past: `startTime` is the beginning of the recorded history
+                // (e.g. 2026-01-07), so timestamping with it hid the metric
+                // from every normal chart range.
                 for (metric, unit, val) in totals(d) {
-                    stats.push(Reading::new(&id, metric, ts, val, unit));
+                    stats.push(Reading::new(&id, metric, now, val, unit));
                 }
             }
         }
@@ -443,17 +472,17 @@ impl Client {
 
         // Flat: outdoor ambient (T4).
         if let Some(arr) = d.get("temp4InfoListDTOS").and_then(|x| x.as_array()) {
-            push_samples(&mut out, id, "ambient_t4", "", arr, "°C");
+            push_samples(&mut out, id, "ambient_t4", "", arr, "°C", "value");
         }
         // Grouped by usage type.
         if let Some(arr) = d.get("electricityInfoDTOS").and_then(|x| x.as_array()) {
-            push_grouped(&mut out, id, "elec_hourly", "electricityInfoListDTOS", arr, "kWh");
+            push_grouped(&mut out, id, "elec_hourly", "electricityInfoListDTOS", arr, "kWh", "value");
         }
         if let Some(arr) = d.get("energyInfoListDTOS").and_then(|x| x.as_array()) {
-            push_grouped(&mut out, id, "heat_produced_hourly", "energyInfoListDTOS", arr, "kWh");
+            push_grouped(&mut out, id, "heat_produced_hourly", "energyInfoListDTOS", arr, "kWh", "allEnergyProduce");
         }
         if let Some(arr) = d.get("copInfoListDTOS").and_then(|x| x.as_array()) {
-            push_grouped(&mut out, id, "cop_hourly", "copInfoListDTOS", arr, "");
+            push_grouped(&mut out, id, "cop_hourly", "copInfoListDTOS", arr, "", "value");
         }
         Ok(out)
     }
@@ -543,6 +572,7 @@ fn push_samples(
     suffix: &str,
     arr: &[Value],
     unit: &str,
+    value_key: &str,
 ) {
     for it in arr {
         let Some(ts) = it
@@ -552,7 +582,7 @@ fn push_samples(
         else {
             continue;
         };
-        let Some(val) = it.get("value").and_then(fnum) else {
+        let Some(val) = it.get(value_key).and_then(fnum) else {
             continue;
         };
         let u = it.get("unit").and_then(|x| x.as_str()).unwrap_or(unit);
@@ -573,11 +603,12 @@ fn push_grouped(
     inner: &str,
     arr: &[Value],
     unit: &str,
+    value_key: &str,
 ) {
     for grp in arr {
         let ty = grp.get("type").and_then(|t| t.as_str()).unwrap_or("");
         if let Some(list) = grp.get(inner).and_then(|x| x.as_array()) {
-            push_samples(out, id, prefix, ty, list, unit);
+            push_samples(out, id, prefix, ty, list, unit, value_key);
         }
     }
 }
@@ -670,15 +701,6 @@ fn fnum(v: &Value) -> Option<f64> {
     }
 }
 
-fn parse_day(v: &Value) -> Option<i64> {
-    // "2026-01-07" -> unix midnight UTC
-    let s = v.as_str()?;
-    let mut it = s.split('-');
-    let y: i64 = it.next()?.parse().ok()?;
-    let m: i64 = it.next()?.parse().ok()?;
-    let d: i64 = it.next()?.parse().ok()?;
-    Some(days_from_civil(y, m, d) * 86_400)
-}
 
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };

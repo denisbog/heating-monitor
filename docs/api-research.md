@@ -103,7 +103,12 @@ Base (EU): https://eu.ibuildinghvac.com/api/apps-oem        <- works
            https://hbtapp-prod.mideaibp.com/api/apps-oem    <- also works (not EU)
            https://eu.mideaibp.com  -> 404                   <- do not use
 
-Auth: same `Authorization: Bearer <accessToken>` from the dollin.net login. No extra signing.
+Auth (since the 2026-10-30 service change): the **raw Dollin token in an
+`accessToken` header**, plus the ordinary v1 HMAC scheme (the same
+`random`/`src`/`appid`/`language`/`clienttype`/`appvnum`/`stamp`/`deviceid`/`sign`/`reqid`
+headers as the business API, with the `btri` prefix). `Authorization: Bearer` is now
+ignored (`3010: The token is empty`), and `accessToken` without a valid `sign` answers
+`3014`. Requests must be signed over exactly the JSON body that is sent.
 Body: {"sn": "<device serial>"}
       sn = <device-serial>   (NOT applianceCode)
 ```
@@ -165,6 +170,9 @@ getAllInfoList.request({ host: oemRequestHost, params: { sn, type, startTime, en
 | `copInfoListDTOS` | grouped by `type`, `{statisticalTime,value,type}` | COP per hour |
 | **`temp4InfoListDTOS`** | **flat** list of `{statisticalTime,value,unit}` | **T4 = outdoor ambient temperature** |
 
+Note: `energyInfoListDTOS` samples carry the produced heat in **`allEnergyProduce`**, not in
+`value`. Parsing them with a generic `value`-looking helper produces no rows at all.
+
 Group `type` values seen: `heat`, `cool`, `tbh`, `ibh`, `others`.
 
 Verified live for 2026-10-11 (10 hourly samples 09:00–19:00):
@@ -180,8 +188,9 @@ works and is strictly more detailed, so prefer it.
 
 ### iLetComfort statistics inventory (all probed live, 2026-10-11)
 
-Every call is `POST https://eu.ibuildinghvac.com/api/apps-oem<path>` with
-`Authorization: Bearer <dollin accessToken>` and body `{...params, app:"iLetComfort", nid:<sn>}`.
+Every call is `POST https://eu.ibuildinghvac.com/api/apps-oem<path>` with the
+`accessToken` + v1-signing headers described above and body
+`{...params, app:"iLetComfort", nid:<sn>}`.
 
 | endpoint | params | returns | usable |
 |---|---|---|---|
