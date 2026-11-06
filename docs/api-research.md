@@ -181,13 +181,14 @@ Note: `energyInfoListDTOS` samples carry the produced heat in **`allEnergyProduc
 | `heat` | Heating | space heating |
 | `cool` | Cooling | space cooling |
 | `dhw` | DHW | domestic hot water |
-| `others` | Others | catch-all bucket, which is where standby/auxiliary consumption lands |
+| `others` | Standby (old plugin: Others) | catch-all bucket, which is where standby/auxiliary consumption lands |
 | `ibh` | IBH | indoor/integrated backup heater |
 | `tbh` | TBH | DHW-tank backup heater |
 
-The app's hourly electricity tabs are `all`, `heat`, `cool`, `dhw`, `others`; it filters
-`ibh` and `tbh` out of the stacked chart and pie, but they are real API rows. The collector
-stores every group, so the extra two are available if wanted.
+The Weex plugin's hourly electricity tabs are `all`, `heat`, `cool`, `dhw`, `others`; the
+current app shows the same bucket as **Standby**. Both hide `ibh`/`tbh` from the stacked
+chart and pie, but they are real API rows. The collector stores every group, so the extra
+two are available if wanted.
 
 `energyInfoListDTOS` and `copInfoListDTOS` only carry `heat`, `cool`, `dhw` and `all`.
 
