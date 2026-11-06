@@ -63,8 +63,9 @@ log and the raw latest-values table are admin-only.
   token lifetime but does not remove the conflict.
 - **CAME keeps no usable room-temperature history** — the 15-minute poll *is* the data
   source, and daily aggregates are computed in SQLite.
-- **iLetComfort serves hourly detail only for the current day**, so it cannot be
-  backfilled. The poll has to run during the day.
+- **iLetComfort keeps roughly a month of hourly detail**, so missed days can be backfilled
+  by replaying `getHourInfoList`; the collector polls today and yesterday each run.
+  `statisticalTime` is UTC, while the phone app shows it in local time.
 - **CAME's `intervaltype=month` means "the calendar month containing `from`"**, not a
   rolling 30 days — ask for the current month *and* the previous one.
 

@@ -210,7 +210,7 @@ Every call is `POST https://eu.ibuildinghvac.com/api/apps-oem<path>` with the
 
 | endpoint | params | returns | usable |
 |---|---|---|---|
-| `/v3/energy/getHourInfoList` | `{sn, day}` | 4 arrays (electricity/energy/cop by type + `temp4InfoListDTOS`) | ✅ **today only** |
+| `/v3/energy/getHourInfoList` | `{sn, day}` | 4 arrays (electricity/energy/cop by type + `temp4InfoListDTOS`) | ✅ **recent days (~1 month)** |
 | `/v3/energy/getAllInfoList` | `{sn, type, startTime, endTime}` | 3 arrays | ⚠️ only `type=YEAR` (1 annual bucket per usage type) |
 | `/v3/energy/getTotalDetail` | `{sn}` | cumulative | ✅ |
 | `/v3/energy/getEnergyLatest` | `{sn}` | instant | ✅ |
@@ -226,8 +226,13 @@ Every call is `POST https://eu.ibuildinghvac.com/api/apps-oem<path>` with the
 (`modeTabs` in `MthermalEnergy.js`). `TOTAL` → `getTotalDetail`, `INSTANT` → `getEnergyLatest`,
 `HOUR` → `getHourInfoList`; the rest go to `getAllInfoList`.
 
-**Key constraint: hourly data exists only for the current day.** The 15-minute poll is
-therefore what builds history — nothing can be backfilled later.
+**Hourly detail is retained for roughly the last month** (Oct 7–Nov 6 answered in a live
+probe, Sep 7 did not), so a missed poll can be backfilled by replaying `getHourInfoList`
+for the affected days. The collector still polls today every run and additionally re-reads
+yesterday, because the app's local "today" can straddle two UTC dates.
+
+`statisticalTime` values are UTC; the app formats them in the phone's local timezone, so
+the same bar appears at a different clock hour there than in a UTC view.
 
 ### What the collector stores per poll
 - iLetComfort: 40+ metrics — `ambient_t4`, `elec_hourly_{all,heat,cool,dhw,tbh,ibh,others}`,

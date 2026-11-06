@@ -423,14 +423,17 @@ impl Client {
             }
         }
 
-        // --- today's hourly detail: ambient T4, per-type electricity/heat/COP ---
-        // Only the current day is served, so this must run during the day.
-        let day = ymd(now);
-        match self.hourly(&id, &app.sn, &day).await {
-            Ok(mut r) => live.append(&mut r),
-            Err(e) => console_log!("hourly {day}: {e}"),
+        // --- hourly detail: ambient T4, per-type electricity/heat/COP ----------
+        // The endpoint keeps roughly the last month, not just today. Fetch
+        // today and yesterday so a local-time "today" that straddles two UTC
+        // dates is complete, and so late corrections for yesterday are stored.
+        for days_ago in [0_i64, 1] {
+            let day = ymd(now - days_ago * 86_400);
+            match self.hourly(&id, &app.sn, &day).await {
+                Ok(mut r) => live.append(&mut r),
+                Err(e) => console_log!("hourly {day}: {e}"),
+            }
         }
-
         // --- cost / savings ----------------------------------------------------
         if let Ok(mut r) = self.charge(&id, &app.sn).await {
             live.append(&mut r);
