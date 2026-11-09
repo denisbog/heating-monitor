@@ -221,6 +221,8 @@ function normChart(c) {
     title: String(c?.title || ""),
     source: c?.source === "ingest" ? "ingest" : "cloud",
     device: String(c?.device || ""),
+    // Ingest only: a node_id to narrow the chart to, or "" for every node.
+    node: /^\d+$/.test(String(c?.node || "")) ? String(Number(c.node)) : "",
     // Which stored clock an ingest chart uses: upload time or device time.
     time: c?.time === "device" ? "device" : "received",
     metrics: Array.isArray(c?.metrics) ? c.metrics.map(String) : [],
@@ -235,12 +237,12 @@ function newChart() {
   if (!cloud.length && ingestDevices.length) {
     const opts = metricOptions("", "ingest");
     return {
-      title: "", source: "ingest", device: "", time: "received",
+      title: "", source: "ingest", device: "", node: "", time: "received",
       metrics: [opts[0].metric], unit: "", kind: "line",
     };
   }
   return {
-    title: "", source: "cloud", device: "", time: "received",
+    title: "", source: "cloud", device: "", node: "", time: "received",
     metrics: cloud.length ? [cloud[0].metric] : [], unit: "", kind: "line",
   };
 }
@@ -282,9 +284,12 @@ function deviceLabel(id, source = "cloud") {
 
 function render() {
   $("#layoutTitle").value = cfg.title || "";
+  for (const c of cfg.charts) {
+    if (/^\d+$/.test(c.node)) knownNodes.add(Number(c.node));
+  }
+  learnNodes();
   const root = $("#charts");
   root.innerHTML = "";
-
   if (!cfg.charts.length) {
     root.innerHTML = '<div class="empty">No custom layout yet — the dashboard uses automatic charts. Add one to take over.</div>';
   }
@@ -323,6 +328,15 @@ function chartEditor(c, i) {
         </select>
       </label>` : "";
 
+  // Node filter. Samples of one mesh device arrive under several `node_id`s;
+  // leaving this empty plots every node as its own series (split by node), a
+  // value narrows the card to that node. The options come from the registry,
+  // the newest samples already loaded on this page and the saved layout.
+  const nodeField = isIngest ? `
+      <label>Node
+        <select class="cnode">${nodeOptionHtml(c.node)}</select>
+      </label>` : "";
+
   el.innerHTML = `
     <header>
       <span class="idx">#${i + 1}</span>
@@ -339,6 +353,7 @@ function chartEditor(c, i) {
         </select>
       </label>
       ${timeField}
+      ${nodeField}
       <label>Device
         <select class="cdevice">
           <option value=""${c.device ? "" : " selected"}>All ${isIngest ? "ingest " : ""}devices</option>
@@ -368,7 +383,8 @@ function chartEditor(c, i) {
       ? "Plotting " + esc(deviceLabel(c.device, c.source))
       : "Plotting every " + (isIngest ? "ingest device" : "device") + " that has the metric"}
       · ${c.metrics.length} series per device${isIngest
-        ? ` · x axis: ${c.time === "device" ? "device clock" : "upload time"}`
+        ? ` · ${c.node ? "node " + esc(c.node) : "all nodes (split by node)"}` +
+          ` · x axis: ${c.time === "device" ? "device clock" : "upload time"}`
         : ""}.</p>
   `;
   return el;
@@ -435,15 +451,21 @@ root.addEventListener("change", (e) => {
   if (e.target.classList.contains("ckind")) { c.kind = e.target.value; updatePreview(); }
   if (e.target.classList.contains("csource")) {
     c.source = e.target.value === "ingest" ? "ingest" : "cloud";
-    // Device ids and metric names differ per source; drop what no longer
-    // exists instead of silently saving a chart that will render empty.
+    // Device ids, node ids and metric names differ per source; drop what no
+    // longer exists instead of silently saving a chart that will render empty.
     c.device = "";
+    c.node = "";
     const valid = new Set(metricOptions("", c.source).map((o) => o.metric));
     c.metrics = c.metrics.filter((m) => valid.has(m));
     render();
   }
   if (e.target.classList.contains("ctime")) {
     c.time = e.target.value === "device" ? "device" : "received";
+    updatePreview();
+  }
+  if (e.target.classList.contains("cnode")) {
+    // Empty means "all nodes", which the chart page renders split by node.
+    c.node = /^\d+$/.test(e.target.value) ? String(Number(e.target.value)) : "";
     updatePreview();
   }
 });
@@ -485,6 +507,45 @@ root.addEventListener("click", (e) => {
 
 let ingestDevices = [];
 
+/// Node ids seen in the newest samples, the registry and the saved layout.
+/// They fill the Node dropdown of an ingest chart.
+let knownNodes = new Set();
+
+/// Returns true when this call discovered a node id that was not known before.
+function learnNodes(rows) {
+  const before = knownNodes.size;
+  for (const r of rows || []) {
+    if (r.node_id !== null && r.node_id !== undefined) knownNodes.add(Number(r.node_id));
+  }
+  for (const d of ingestDevices) if (d.node_id) knownNodes.add(Number(d.node_id));
+  return knownNodes.size !== before;
+}
+
+/// `<option>` list for the Node dropdown: every node that is selected or has
+/// been seen, plus the empty "all nodes (split by node)" choice.
+function nodeOptionHtml(selected) {
+  const ids = [...knownNodes].filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
+  // A chart can point at a node that has not uploaded since the page loaded
+  // (or belongs to a device that is no longer registered); keep it selectable.
+  if (selected && /^\d+$/.test(selected) && !ids.includes(Number(selected))) {
+    ids.push(Number(selected));
+  }
+  return (
+    `<option value=""${selected ? "" : " selected"}>all nodes (split by node)</option>` +
+    ids.map((n) => `<option value="${n}"${String(n) === selected ? " selected" : ""}>node ${n}</option>`).join("")
+  );
+}
+
+/// Rebuild the Node dropdowns in place when loading samples surfaced new nodes,
+/// without re-rendering the cards (which would drop the current focus).
+function refreshNodeSelects() {
+  for (const sel of document.querySelectorAll("#charts .cnode")) {
+    const card = sel.closest("[data-i]");
+    const c = card && cfg.charts[Number(card.dataset.i)];
+    if (c) sel.innerHTML = nodeOptionHtml(c.node);
+  }
+}
+
 const fmtTime = (secs) => (secs ? new Date(secs * 1000).toLocaleString() : "—");
 const fmtVal = (v) => (v === null || v === undefined || v === "" ? "—" : String(v));
 /// Device clock offset: when the device says it sent the batch vs when we got it.
@@ -524,6 +585,7 @@ async function loadIngest() {
 }
 
 function renderIngest() {
+  if (learnNodes()) refreshNodeSelects();
   const root = $("#ingestList");
   if (!ingestDevices.length) {
     root.innerHTML = '<div class="empty">No ingest devices yet — register one above.</div>';
@@ -606,6 +668,7 @@ async function loadSamples() {
     const q = new URLSearchParams({ limit });
     if (device) q.set("device", device);
     const rows = await api("/api/ingest/samples?" + q);
+    if (learnNodes(rows)) refreshNodeSelects();
     const body = $("#samplesTable").querySelector("tbody");
     body.innerHTML = rows.length
       ? rows.map((r) => `<tr>

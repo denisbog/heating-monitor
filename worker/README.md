@@ -46,10 +46,11 @@ scripts/fake-device.py  signs and posts device batches; runs the AT suite
       server-side in `settings` and rendered by every client. Reading the layout
       needs any token, writing it needs `API_TOKEN`
 - [x] Ingest charts: a chart can plot the device `samples` instead of the cloud
-      readings, and chooses its timeline — server upload time (`received_at`)
-      or the device clock (`device_collected_at`) — per chart. Served by
-      `GET /api/ingest/series`, bucketed server-side, with an automatic
-      "Ingested sensors" section when no layout is configured
+      readings, chooses its timeline — server upload time (`received_at`) or the
+      device clock (`device_collected_at`) — and splits series by `node_id`, or
+      narrows to one node, per chart. Served by `GET /api/ingest/series`,
+      bucketed server-side, with an automatic "Ingested sensors" section when no
+      layout is configured
 - [x] Deployed and verified live: **3 devices, 324 readings** per run — 40+ iLetComfort metrics
       (incl. `ambient_t4` outdoor ambient, hourly electricity/COP by usage type, cost in EUR)
       and 20 per CAME thermostat (incl. `internal_temp`, `humidity_avg`, window averages)
@@ -113,6 +114,26 @@ taken. Samples with no device clock are skipped in the `device` view rather
 than pretending they were taken at upload time. Both timelines are available
 per chart, so one dashboard can show "when did it arrive" next to "when was it
 measured".
+
+### Splitting by node
+
+One mesh device reports samples under several `node_id`s (a hub plus its sensor
+nodes), so every ingest series is one `(device, node, metric)` line. The chart
+editor makes that explicit:
+
+- **Node = all (empty)** — split by node: each node becomes its own series,
+  named `temperature · node 7` when the device has more than one node.
+- **Node = 7** — only node 7's data is plotted. The series keeps the node label
+  so two single-node cards stay distinguishable.
+
+The filter is applied in the browser, not in the API: the page fetches each
+timeline once and every chart shares it, so a dashboard with ten per-node cards
+still costs one request. `GET /api/ingest/series` always returns `node_id` with
+each row, which is enough for any other client to split or filter the same way.
+The editor renders the Node choice as a dropdown: the registry's `node_id`, the
+nodes in the newest samples already loaded on the page, and any node the saved
+layout already uses. A node that has not uploaded since the page loaded stays
+selectable, so editing an old chart never silently resets its filter.
 
 The chart data endpoint is `GET /api/ingest/series`:
 

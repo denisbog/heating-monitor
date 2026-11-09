@@ -531,12 +531,23 @@ function cloudSeries(spec, byDevice, daily) {
 /// its nodes apart instead of collapsing them into one line.
 function ingestSeries(spec, points) {
   const metrics = new Set(spec.metrics);
+  // `node` narrows an ingest chart to one node_id; empty keeps every node.
+  // Filtering happens here rather than in the API so one fetch of a timeline
+  // feeds every chart, whether it splits by node or selects one.
+  const node = String(spec.node || "").trim();
   const wanted = points.filter(
-    (p) => metrics.has(p.metric) && (!spec.device || p.device_id === spec.device)
+    (p) =>
+      metrics.has(p.metric) &&
+      (!spec.device || p.device_id === spec.device) &&
+      (!node || String(p.node_id) === node)
   );
 
+  // Node count per device comes from the *unfiltered* metric set, so a chart
+  // narrowed to node 7 still reads "temperature · node 7" next to a node-9
+  // chart instead of two charts both labelled "temperature".
   const nodes = new Map();
-  for (const p of wanted) {
+  for (const p of points) {
+    if (!metrics.has(p.metric) || (spec.device && p.device_id !== spec.device)) continue;
     if (!nodes.has(p.device_id)) nodes.set(p.device_id, new Set());
     nodes.get(p.device_id).add(p.node_id);
   }

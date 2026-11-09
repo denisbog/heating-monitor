@@ -29,6 +29,11 @@ pub struct ChartSpec {
     /// Device id to plot, or empty to plot every device that has the metric.
     #[serde(default)]
     pub device: String,
+    /// Ingest charts only: plot a single `node_id`; empty plots every node,
+    /// each as its own series. Mesh devices send samples under several node
+    /// ids, so this is what lets one chart show node 7 next to node 9.
+    #[serde(default)]
+    pub node: String,
     /// Metrics drawn as series.
     #[serde(default)]
     pub metrics: Vec<String>,
@@ -94,6 +99,15 @@ impl Dashboard {
             }
             .to_string();
             c.device = c.device.trim().chars().take(TEXT).collect();
+            // Node ids are 1..254; anything else means "every node".
+            c.node = c
+                .node
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|n| *n > 0)
+                .map(|n| n.to_string())
+                .unwrap_or_default();
             c.unit = c.unit.trim().chars().take(24).collect();
             c.kind = match c.kind.trim() {
                 "area" => "area",
@@ -138,6 +152,22 @@ mod tests {
         .sanitize();
         assert_eq!(cfg.charts[0].source, "ingest");
         assert_eq!(cfg.charts[0].time, "device");
+    }
+
+    #[test]
+    fn node_filter_is_normalised_or_dropped() {
+        let cfg = serde_json::from_str::<Dashboard>(
+            r#"{"charts":[
+                {"source":"ingest","node":" 7 ","metrics":["temperature"]},
+                {"source":"ingest","node":"abc","metrics":["humidity"]},
+                {"source":"ingest","metrics":["battery"]}
+            ]}"#,
+        )
+        .unwrap()
+        .sanitize();
+        assert_eq!(cfg.charts[0].node, "7");
+        assert_eq!(cfg.charts[1].node, "");
+        assert_eq!(cfg.charts[2].node, "");
     }
 
     #[test]
