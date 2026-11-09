@@ -67,6 +67,13 @@ pub fn iso_days_ago(days: i64) -> String {
     )
 }
 
+/// `YYYY-MM-DD` in UTC for `ts` — the same string SQLite's
+/// `date(ts, 'unixepoch')` produces, used to name days in the `daily` rollup.
+pub fn day_str(ts: i64) -> String {
+    let (y, m, d) = crate::iletcomfort::civil_from_days(ts.div_euclid(86_400));
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 /// Marker embedded in errors meaning "the cached session was rejected".
 ///
 /// Both clouds keep only one session per account, so a rejected token is a

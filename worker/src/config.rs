@@ -21,6 +21,11 @@ pub struct ChartSpec {
     /// Card heading; empty falls back to a generated title.
     #[serde(default)]
     pub title: String,
+    /// Where the series come from: `cloud` (default — the provider `readings`
+    /// table, i.e. the heat pump and thermostats) or `ingest` (the samples the
+    /// eink-x devices push to `/v1/samples`).
+    #[serde(default)]
+    pub source: String,
     /// Device id to plot, or empty to plot every device that has the metric.
     #[serde(default)]
     pub device: String,
@@ -33,6 +38,12 @@ pub struct ChartSpec {
     /// `line` (default), `area` or `bar`.
     #[serde(default)]
     pub kind: String,
+    /// Ingest charts only: which of the two stored clocks is the x axis.
+    /// `received` (default) is the server clock at upload; `device` is the
+    /// untrusted `device_collected_at` the firmware reported when it queued the
+    /// sample. Empty rows for the chosen clock are skipped.
+    #[serde(default)]
+    pub time: String,
 }
 
 /// The whole layout.
@@ -72,6 +83,16 @@ impl Dashboard {
         self.charts.truncate(MAX_CHARTS);
         for c in &mut self.charts {
             c.title = c.title.trim().chars().take(TEXT).collect();
+            c.source = match c.source.trim() {
+                "ingest" => "ingest",
+                _ => "cloud",
+            }
+            .to_string();
+            c.time = match c.time.trim() {
+                "device" => "device",
+                _ => "received",
+            }
+            .to_string();
             c.device = c.device.trim().chars().take(TEXT).collect();
             c.unit = c.unit.trim().chars().take(24).collect();
             c.kind = match c.kind.trim() {
@@ -90,5 +111,43 @@ impl Dashboard {
         }
         self.charts.retain(|c| !c.metrics.is_empty());
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_layouts_default_to_cloud_and_upload_time() {
+        // A layout stored before ingest charts existed has neither field.
+        let cfg: Dashboard =
+            serde_json::from_str(r#"{"version":1,"charts":[{"metrics":["t_out"]}]}"#).unwrap();
+        assert_eq!(cfg.charts[0].source, "");
+        let cfg = cfg.sanitize();
+        assert_eq!(cfg.charts[0].source, "cloud");
+        assert_eq!(cfg.charts[0].time, "received");
+    }
+
+    #[test]
+    fn ingest_source_and_timeline_are_kept() {
+        let cfg = serde_json::from_str::<Dashboard>(
+            r#"{"charts":[{"source":"ingest","time":"device","metrics":["temperature"]}]}"#,
+        )
+        .unwrap()
+        .sanitize();
+        assert_eq!(cfg.charts[0].source, "ingest");
+        assert_eq!(cfg.charts[0].time, "device");
+    }
+
+    #[test]
+    fn unknown_source_and_timeline_fall_back() {
+        let cfg = serde_json::from_str::<Dashboard>(
+            r#"{"charts":[{"source":" samples ","time":"collected","metrics":["humidity"]}]}"#,
+        )
+        .unwrap()
+        .sanitize();
+        assert_eq!(cfg.charts[0].source, "cloud");
+        assert_eq!(cfg.charts[0].time, "received");
     }
 }

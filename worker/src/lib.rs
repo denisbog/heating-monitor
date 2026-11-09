@@ -9,11 +9,13 @@
 //!   CAMECONNECT_CLIENT_ID, CAMECONNECT_CLIENT_SECRET
 //!   API_TOKEN
 
+pub mod admin;
 pub mod cameconnect;
 pub mod config;
 pub mod db;
 pub mod http;
 pub mod iletcomfort;
+pub mod ingest;
 pub mod model;
 
 use worker::*;
@@ -67,6 +69,30 @@ async fn collect_all(env: &Env, with_history: bool) -> Result<(usize, usize)> {
 
     db::upsert_devices(&db, &devices).await?;
     let written = db::insert_readings(&db, &readings).await?;
+
+    // Roll up the daily aggregates from raw readings. Cheap and idempotent, but
+    // it re-reads two days of samples, so it follows the same hourly gate as the
+    // provider history pulls; `/api/daily` serves `daily` directly, which is why
+    // it no longer scans the whole table.
+    //
+    // The trailing window is widened when this batch added samples to a day that
+    // has no rollup row yet — history pulled after an outage is older than the
+    // window and would otherwise never appear in the charts.
+    if with_history {
+        let trailing = model::day_str(model::now_secs() - 2 * 86_400);
+        let since = match db::oldest_unrolled_day(&db, &readings).await {
+            Ok(Some(day)) => day.min(trailing),
+            Ok(None) => trailing,
+            Err(e) => {
+                console_error!("daily rollup: {e}");
+                trailing
+            }
+        };
+        if let Err(e) = db::refresh_daily(&db, &since).await {
+            console_error!("daily rollup: {e}");
+            errors.push(format!("daily rollup: {e}"));
+        }
+    }
 
     let status = if errors.is_empty() {
         "ok"
@@ -216,6 +242,15 @@ async fn collect_came(
 #[event(fetch)]
 pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     Router::new()
+        // Device ingest (`ingest.rs`). Deliberately outside `/api/`: it is the
+        // device-facing surface, with its own auth (per-device HMAC) and its own
+        // response shape.
+        .post_async("/v1/samples", |req, ctx| async move {
+            ingest::samples(req, ctx.env).await
+        })
+        .get_async("/v1/health", |_req, ctx| async move {
+            ingest::health(&ctx.env).await
+        })
         .get_async("/api/health", |_req, _ctx| async move {
             Response::from_json(&serde_json::json!({"ok": true}))
         })
@@ -319,12 +354,94 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             let db = ctx.env.d1("DB")?;
             Response::from_json(&db::metrics(&db).await?)
         })
+        // Chart-ready series from the device ingest (`samples`), which is what
+        // lets a dashboard card plot an eink-x sensor instead of a cloud
+        // device. Readable with either token: unlike the admin registry below
+        // it returns measurements only — no keys, IPs or firmware versions.
+        // `time=received` (default) plots upload time, `time=device` the
+        // device's own `device_collected_at` clock.
+        .get_async("/api/ingest/series", |req, ctx| async move {
+            if !authorized(&req, &ctx.env) {
+                return Response::error("unauthorized", 401);
+            }
+            let q = query_params(&req);
+            let to = q
+                .get("to")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(model::now_secs);
+            let from = q
+                .get("from")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(to - 7 * 86_400);
+            let (from, to) = if from <= to { (from, to) } else { (to, from) };
+            let device_clock = matches!(
+                q.get("time").map(String::as_str),
+                Some("device") | Some("device_collected_at") | Some("collected")
+            );
+            let bucket = q
+                .get("bucket")
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|b| *b > 0)
+                .unwrap_or_else(|| db::pick_bucket(from, to));
+            let db = ctx.env.d1("DB")?;
+            let rows = db::sample_series(
+                &db,
+                q.get("device").map(String::as_str).unwrap_or(""),
+                from,
+                to,
+                device_clock,
+                bucket,
+            )
+            .await?;
+            Response::from_json(&rows)
+        })
         // Lets the admin page tell "admin token" from "read-only token".
         .get_async("/api/whoami", |req, ctx| async move {
             Response::from_json(&serde_json::json!({
                 "read": authorized(&req, &ctx.env),
                 "admin": authorized_admin(&req, &ctx.env),
             }))
+        })
+        // Ingest device registry (operator surface for `POST /v1/samples`).
+        // Admin token only: it holds per-device keys and last-seen IPs.
+        .get_async("/api/ingest/devices", |req, ctx| async move {
+            if !authorized_admin(&req, &ctx.env) {
+                return Response::error("read-only token: admin access required", 403);
+            }
+            admin::list(&ctx.env).await
+        })
+        // Newest stored samples (v2 HR-223): feeds the admin "recent samples"
+        // table; capped at 200 rows and index-ordered.
+        .get_async("/api/ingest/samples", |req, ctx| async move {
+            if !authorized_admin(&req, &ctx.env) {
+                return Response::error("read-only token: admin access required", 403);
+            }
+            admin::samples(req, &ctx.env).await
+        })
+        .post_async("/api/ingest/devices", |req, ctx| async move {
+            if !authorized_admin(&req, &ctx.env) {
+                return Response::error("read-only token: admin access required", 403);
+            }
+            admin::create(req, &ctx.env).await
+        })
+        .put_async("/api/ingest/devices/:id", |req, ctx| async move {
+            if !authorized_admin(&req, &ctx.env) {
+                return Response::error("read-only token: admin access required", 403);
+            }
+            admin::update(req, &ctx).await
+        })
+        .delete_async("/api/ingest/devices/:id", |req, ctx| async move {
+            if !authorized_admin(&req, &ctx.env) {
+                return Response::error("read-only token: admin access required", 403);
+            }
+            admin::remove(&ctx).await
+        })
+        // Set or rotate the HMAC key; the value is returned exactly once.
+        .post_async("/api/ingest/devices/:id/key", |req, ctx| async move {
+            if !authorized_admin(&req, &ctx.env) {
+                return Response::error("read-only token: admin access required", 403);
+            }
+            admin::rotate(req, &ctx).await
         })
         // Manual trigger: run a collection now instead of waiting for cron.
         .post_async("/api/collect", |req, ctx| async move {

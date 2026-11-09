@@ -46,8 +46,10 @@ wrangler deploy
 Then open the Worker URL and paste the read token. It is installable as a PWA.
 The admin token also unlocks `/admin`, where you choose how many charts the
 dashboard shows and what each one plots (`GET`/`PUT /api/config`, stored in the
-`settings` table). A read-only token still sees the charts, but the collector-run
-log and the raw latest-values table are admin-only.
+`settings` table). A chart plots either the cloud readings or the samples the
+ingest devices push, and an ingest chart chooses its timeline — server upload
+time or the device's own clock. A read-only token still sees the charts, but the
+collector-run log and the raw latest-values table are admin-only.
 
 ### Two access levels
 

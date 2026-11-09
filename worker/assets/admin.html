@@ -50,6 +50,22 @@
   .pick select, .pick input { flex: 1 1 12rem; }
   .hint { font-size: .78rem; opacity: .55; margin-top: .5rem; }
   details { margin-top: 1.5rem; }
+  .keynote { border: 1px solid var(--ok); border-radius: 10px; padding: .75rem .9rem; margin: 1rem 0; }
+  .keynote strong { color: var(--ok); }
+  .keyrow { display: flex; gap: .75rem; align-items: flex-start; justify-content: space-between; }
+  .keyrow .hint { margin: 0; }
+  #keyValue { word-break: break-all; white-space: pre-wrap; margin: .6rem 0 0; }
+  .dev { display: flex; gap: .6rem; flex-wrap: wrap; align-items: flex-end; }
+  .dev label { display: flex; flex-direction: column; gap: .15rem; font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; opacity: .7; }
+  .card.disabled .ctitle { opacity: .5; }
+  .tag { border: 1px solid var(--line); border-radius: 999px; padding: .05rem .5rem; font-size: .72rem; opacity: .8; }
+  .tag.off { border-color: var(--err); color: var(--err); }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: .82rem; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: .3rem .5rem; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { font-size: .7rem; text-transform: uppercase; letter-spacing: .05em; opacity: .6; font-weight: 600; }
+  td.num { text-align: right; }
+  tbody tr:last-child td { border-bottom: 0; }
   summary { cursor: pointer; opacity: .6; font-size: .85rem; }
   pre { overflow: auto; font-size: .78rem; border: 1px solid var(--line); border-radius: 8px; padding: .6rem; }
 </style>
@@ -57,7 +73,11 @@
 <body>
 <h1>Chart admin</h1>
 <p class="sub">Choose how many charts the dashboard shows and what each one plots.
-Changes are stored server-side and apply to every client.
+A chart reads either the <strong>cloud readings</strong> (heat pump and thermostats)
+or the <strong>ingest sensors</strong> (devices that push to <code>/v1/samples</code>);
+ingest charts also choose their timeline — upload time (server clock) or device
+time (the clock the firmware reported). Changes are stored server-side and apply
+to every client.
 An <strong>admin</strong> token (<code>API_TOKEN</code>) is required to save.</p>
 
 <form class="auth" id="auth">
@@ -81,6 +101,70 @@ An <strong>admin</strong> token (<code>API_TOKEN</code>) is required to save.</p
 </div>
 
 <div id="charts"></div>
+
+<h2>Device ingest</h2>
+<p class="sub">Devices that push samples to <code>/v1/samples</code>. A device key is shown
+once — when it is created or rotated — and cannot be read back afterwards.</p>
+
+<div id="ingestKey" class="keynote" hidden></div>
+
+<div class="card">
+  <header>
+    <span class="ctitle">Register a device</span>
+    <span class="hint" id="ingestUrl"></span>
+  </header>
+  <div class="dev">
+    <label>Device id (BLE address)<input id="ndId" placeholder="E5983C9E9E32" maxlength="12" size="14" spellcheck="false"></label>
+    <label>Name<input id="ndName" placeholder="optional" size="12"></label>
+    <label>Role<select id="ndRole">
+      <option value="">—</option>
+      <option value="server">server (hub)</option>
+      <option value="client">client</option>
+      <option value="direct">direct</option>
+    </select></label>
+    <label>Node<input id="ndNode" type="number" min="1" max="254" placeholder="1..254" size="4"></label>
+    <label>Period (min)<input id="ndPeriod" type="number" min="1" max="1440" placeholder="1..1440" size="5"></label>
+    <button id="ndAdd" disabled>Register &amp; generate key</button>
+  </div>
+  <p class="hint">The id is the device's BLE address without separators. Registering an
+  existing id replaces its key and re-enables it.</p>
+</div>
+
+<div class="bar">
+  <button id="ingestReload" disabled>Reload devices</button>
+  <span class="spacer"></span>
+  <span class="sub" id="ingestStatus"></span>
+</div>
+<div id="ingestList"></div>
+
+<h2>Recent samples</h2>
+<p class="sub">The last stored samples, newest first (server time). The device time is
+what the firmware reported when it queued the sample — <em>—</em> means the device had no
+clock yet.</p>
+
+<div class="bar">
+  <label class="sub" style="display:flex;gap:.5rem;align-items:center">Device
+    <select id="sampleDevice"><option value="">all devices</option></select>
+  </label>
+  <label class="sub" style="display:flex;gap:.5rem;align-items:center">Rows
+    <select id="sampleLimit">
+      <option>20</option><option selected>50</option><option>100</option><option>200</option>
+    </select>
+  </label>
+  <button id="samplesReload" disabled>Load samples</button>
+  <span class="spacer"></span>
+  <span class="sub" id="samplesStatus"></span>
+</div>
+
+<div class="scroll">
+  <table id="samplesTable">
+    <thead><tr>
+      <th>received</th><th>device time</th><th>device</th><th>node</th><th>seq</th>
+      <th>t °C</th><th>h %</th><th>battery</th><th>up</th><th>batch</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
 
 <details>
   <summary>Payload that will be saved</summary>
@@ -124,18 +208,41 @@ async function api(path, opts = {}) {
 
 // --- model -----------------------------------------------------------------
 
+// The three columns the ingest firmware stores per sample; the server pivots
+// them to one series each (`/api/ingest/series`). Kept in sync with `db.rs`.
+const INGEST_METRICS = [
+  { metric: "temperature", unit: "°C" },
+  { metric: "humidity", unit: "%" },
+  { metric: "battery", unit: "V" },
+];
+
 function normChart(c) {
   return {
     title: String(c?.title || ""),
+    source: c?.source === "ingest" ? "ingest" : "cloud",
     device: String(c?.device || ""),
+    // Which stored clock an ingest chart uses: upload time or device time.
+    time: c?.time === "device" ? "device" : "received",
     metrics: Array.isArray(c?.metrics) ? c.metrics.map(String) : [],
     unit: String(c?.unit || ""),
     kind: ["line", "area", "bar"].includes(c?.kind) ? c.kind : "line",
   };
 }
 function newChart() {
-  const opts = metricOptions("");
-  return { title: "", device: "", metrics: opts.length ? [opts[0].metric] : [], unit: "", kind: "line" };
+  // A sensors-only deployment has no cloud metrics, so default the new card to
+  // the ingest source rather than handing the user an empty picker.
+  const cloud = metricOptions("", "cloud");
+  if (!cloud.length && ingestDevices.length) {
+    const opts = metricOptions("", "ingest");
+    return {
+      title: "", source: "ingest", device: "", time: "received",
+      metrics: [opts[0].metric], unit: "", kind: "line",
+    };
+  }
+  return {
+    title: "", source: "cloud", device: "", time: "received",
+    metrics: cloud.length ? [cloud[0].metric] : [], unit: "", kind: "line",
+  };
 }
 
 function buildMetricIndex(rows) {
@@ -152,7 +259,9 @@ function buildMetricIndex(rows) {
 }
 
 /// Available metrics for a device id, or the union across devices for "".
-function metricOptions(deviceId) {
+/// Ingest charts offer the fixed sensor columns instead of cloud metrics.
+function metricOptions(deviceId, source = "cloud") {
+  if (source === "ingest") return INGEST_METRICS.map((m) => ({ ...m }));
   const seen = new Map();
   const ids = deviceId ? [deviceId] : [...metricsByDevice.keys()];
   for (const id of ids) {
@@ -163,9 +272,10 @@ function metricOptions(deviceId) {
   return [...seen].sort((a, b) => a[0].localeCompare(b[0])).map(([metric, unit]) => ({ metric, unit }));
 }
 
-function deviceLabel(id) {
-  const d = devices.find((x) => x.id === id);
-  return d ? (d.name || d.external_id) : id;
+function deviceLabel(id, source = "cloud") {
+  const list = source === "ingest" ? ingestDevices : devices;
+  const d = list.find((x) => x.id === id);
+  return d ? (d.name || d.id) : id;
 }
 
 // --- render ----------------------------------------------------------------
@@ -188,10 +298,30 @@ function chartEditor(c, i) {
   el.className = "card";
   el.dataset.i = i;
 
-  const opts = metricOptions(c.device);
+  const isIngest = c.source === "ingest";
+  const opts = metricOptions(c.device, c.source);
   const optionHtml = (sel) => opts.map((o) =>
     `<option value="${esc(o.metric)}"${o.metric === sel ? " selected" : ""}>${esc(o.metric)}${o.unit ? " (" + esc(o.unit) + ")" : ""}</option>`
   ).join("");
+
+  // Cloud charts pick from the discovered provider devices; ingest charts pick
+  // from the operator-registered sensor devices. Empty means "all devices".
+  const deviceList = isIngest ? ingestDevices : devices;
+  const deviceOpts = deviceList.map((d) => {
+    const label = d.name || (isIngest ? d.id : d.external_id);
+    const suffix = isIngest ? "" : ` · ${d.provider}`;
+    return `<option value="${esc(d.id)}"${d.id === c.device ? " selected" : ""}>${esc(label)}${esc(suffix)}</option>`;
+  }).join("");
+
+  // The two clocks the ingest store keeps per sample: the server clock at
+  // upload and the (untrusted) clock the firmware reported when it queued it.
+  const timeField = isIngest ? `
+      <label>Timeline
+        <select class="ctime">
+          <option value="received"${c.time === "device" ? "" : " selected"}>upload time (server)</option>
+          <option value="device"${c.time === "device" ? " selected" : ""}>device time (collected_at)</option>
+        </select>
+      </label>` : "";
 
   el.innerHTML = `
     <header>
@@ -202,10 +332,17 @@ function chartEditor(c, i) {
       <button data-act="del" title="Remove chart">✕</button>
     </header>
     <div class="fields">
+      <label>Source
+        <select class="csource">
+          <option value="cloud"${isIngest ? "" : " selected"}>Cloud readings</option>
+          <option value="ingest"${isIngest ? " selected" : ""}>Ingest sensors</option>
+        </select>
+      </label>
+      ${timeField}
       <label>Device
         <select class="cdevice">
-          <option value=""${c.device ? "" : " selected"}>All devices</option>
-          ${devices.map((d) => `<option value="${esc(d.id)}"${d.id === c.device ? " selected" : ""}>${esc(d.name || d.external_id)} · ${esc(d.provider)}</option>`).join("")}
+          <option value=""${c.device ? "" : " selected"}>All ${isIngest ? "ingest " : ""}devices</option>
+          ${deviceOpts}
         </select>
       </label>
       <label>Type
@@ -224,11 +361,15 @@ function chartEditor(c, i) {
     <div class="pick">
       <select class="cmetric"><option value="">— metric —</option>${optionHtml("")}</select>
       <button data-act="addmetric">Add metric</button>
-      <input class="ccustom" list="allmetrics" placeholder="or type any metric name">
-      <button data-act="addcustom">Add custom</button>
+      ${isIngest ? "" : `<input class="ccustom" list="allmetrics" placeholder="or type any metric name">
+      <button data-act="addcustom">Add custom</button>`}
     </div>
-    <p class="hint">${c.device ? "Plotting " + esc(deviceLabel(c.device)) : "Plotting every device that has the metric"}
-      · ${c.metrics.length} series per device.</p>
+    <p class="hint">${c.device
+      ? "Plotting " + esc(deviceLabel(c.device, c.source))
+      : "Plotting every " + (isIngest ? "ingest device" : "device") + " that has the metric"}
+      · ${c.metrics.length} series per device${isIngest
+        ? ` · x axis: ${c.time === "device" ? "device clock" : "upload time"}`
+        : ""}.</p>
   `;
   return el;
 }
@@ -292,6 +433,19 @@ root.addEventListener("change", (e) => {
   const c = cfg.charts[Number(card.dataset.i)];
   if (e.target.classList.contains("cdevice")) { c.device = e.target.value; render(); }
   if (e.target.classList.contains("ckind")) { c.kind = e.target.value; updatePreview(); }
+  if (e.target.classList.contains("csource")) {
+    c.source = e.target.value === "ingest" ? "ingest" : "cloud";
+    // Device ids and metric names differ per source; drop what no longer
+    // exists instead of silently saving a chart that will render empty.
+    c.device = "";
+    const valid = new Set(metricOptions("", c.source).map((o) => o.metric));
+    c.metrics = c.metrics.filter((m) => valid.has(m));
+    render();
+  }
+  if (e.target.classList.contains("ctime")) {
+    c.time = e.target.value === "device" ? "device" : "received";
+    updatePreview();
+  }
 });
 
 root.addEventListener("click", (e) => {
@@ -327,11 +481,238 @@ root.addEventListener("click", (e) => {
   }
 });
 
+// --- ingest devices ---------------------------------------------------------
+
+let ingestDevices = [];
+
+const fmtTime = (secs) => (secs ? new Date(secs * 1000).toLocaleString() : "—");
+const fmtVal = (v) => (v === null || v === undefined || v === "" ? "—" : String(v));
+/// Device clock offset: when the device says it sent the batch vs when we got it.
+function fmtClock(d) {
+  if (d.last_sent_at === null || d.last_sent_at === undefined || d.last_seen === null) return "—";
+  const drift = Number(d.last_sent_at) - Number(d.last_seen);
+  if (Math.abs(drift) < 2) return "in sync";
+  return `${drift > 0 ? "+" : ""}${drift} s`;
+}
+const fmtTemp = (t) => (t === null || t === undefined ? "—" : (Number(t) / 10).toFixed(1));
+const fmtBatt = (mv) => (!mv ? "—" : (Number(mv) / 1000).toFixed(2) + " V");
+
+function showKey(id, key) {
+  const box = $("#ingestKey");
+  box.hidden = false;
+  box.innerHTML = `
+    <div class="keyrow">
+      <div>
+        <strong>Key for ${esc(id)}</strong>
+        <p class="hint">Copy it into the device's BLE config (uplink key, 32 raw bytes) now.
+        It is not stored anywhere retrievable and will not be shown again.</p>
+      </div>
+      <button data-copy="${esc(key)}">Copy</button>
+    </div>
+    <pre id="keyValue">${esc(key)}</pre>`;
+}
+
+async function loadIngest() {
+  try {
+    ingestDevices = await api("/api/ingest/devices");
+    renderIngest();
+    $("#ingestStatus").textContent = `${ingestDevices.length} registered`;
+  } catch (e) {
+    $("#ingestStatus").textContent = "";
+    $("#ingestList").innerHTML = `<div class="empty">${esc(e.message || e)}</div>`;
+  }
+}
+
+function renderIngest() {
+  const root = $("#ingestList");
+  if (!ingestDevices.length) {
+    root.innerHTML = '<div class="empty">No ingest devices yet — register one above.</div>';
+    return;
+  }
+  root.innerHTML = ingestDevices.map(ingestCard).join("");
+
+  const sel = $("#sampleDevice");
+  const keep = sel.value;
+  sel.innerHTML =
+    '<option value="">all devices</option>' +
+    ingestDevices
+      .map((d) => `<option value="${esc(d.id)}">${esc(d.id)}${d.name ? " · " + esc(d.name) : ""}</option>`)
+      .join("");
+  sel.value = ingestDevices.some((d) => d.id === keep) ? keep : "";
+}
+
+function ingestCard(d) {
+  const off = Number(d.disabled) !== 0;
+  const roleOpt = (v) =>
+    ["", "server", "client", "direct"]
+      .map((r) => `<option value="${r}"${r === (d.role || "") ? " selected" : ""}>${r || "—"}</option>`)
+      .join("");
+  return `
+  <div class="card${off ? " disabled" : ""}" data-id="${esc(d.id)}">
+    <header>
+      <span class="ctitle"><code>${esc(d.id)}</code></span>
+      <span class="tag${off ? " off" : ""}">${off ? "disabled" : "enabled"}</span>
+      <input class="dname" placeholder="name" value="${esc(d.name || "")}" size="12">
+      <button data-act="save">Save</button>
+      <button data-act="key" title="New HMAC key; the old one stops working immediately">Rotate key</button>
+      <button data-act="del" title="Unregister (stored samples are kept)">✕</button>
+    </header>
+    <div class="dev">
+      <label>Role<select class="drole">${roleOpt()}</select></label>
+      <label>Node<input class="dnode" type="number" min="1" max="254" value="${d.node_id ?? ""}" size="4"></label>
+      <label>Period (min)<input class="dperiod" type="number" min="1" max="1440" value="${d.period_min ?? ""}" size="5"></label>
+      <label>Status<select class="ddisabled">
+        <option value="0"${off ? "" : " selected"}>enabled</option>
+        <option value="1"${off ? " selected" : ""}>disabled</option>
+      </select></label>
+    </div>
+    <p class="hint">last upload ${esc(fmtTime(d.last_seen))} · last sample ${esc(fmtTime(d.last_sample_at))}
+      · clock ${esc(fmtClock(d))} · ${esc(fmtVal(d.samples_total))} samples in
+      ${esc(fmtVal(d.batches_total))} batches${Number(d.rejected_total) ? ` (${esc(d.rejected_total)} rejected)` : ""}
+      · batch ${esc(fmtVal(d.last_batch))} · boot ${esc(fmtVal(d.last_boot_id))}
+      · firmware ${esc(fmtVal(d.firmware))} · ip ${esc(fmtVal(d.last_ip))}</p>
+  </div>`;
+}
+
+async function saveIngest(card) {
+  const id = card.dataset.id;
+  const num = (sel) => {
+    const v = card.querySelector(sel).value.trim();
+    return v === "" ? 0 : Number(v);
+  };
+  const body = {
+    name: card.querySelector(".dname").value.trim(),
+    role: card.querySelector(".drole").value,
+    node_id: num(".dnode"),
+    period_min: num(".dperiod"),
+    disabled: card.querySelector(".ddisabled").value === "1",
+  };
+  await api("/api/ingest/devices/" + encodeURIComponent(id), {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  await loadIngest();
+  setStatus(`Saved ${id}.`, "ok");
+}
+
+$("#ingestReload").addEventListener("click", loadIngest);
+
+async function loadSamples() {
+  const device = $("#sampleDevice").value;
+  const limit = $("#sampleLimit").value;
+  $("#samplesStatus").textContent = "Loading…";
+  try {
+    const q = new URLSearchParams({ limit });
+    if (device) q.set("device", device);
+    const rows = await api("/api/ingest/samples?" + q);
+    const body = $("#samplesTable").querySelector("tbody");
+    body.innerHTML = rows.length
+      ? rows.map((r) => `<tr>
+          <td>${esc(fmtTime(r.received_at))}</td>
+          <td>${esc(fmtTime(r.device_collected_at))}</td>
+          <td><code>${esc(r.device_id)}</code></td>
+          <td class="num">${esc(r.node_id)}</td>
+          <td class="num">${esc(r.seq)}</td>
+          <td class="num">${esc(fmtTemp(r.t_x10))}</td>
+          <td class="num">${esc((Number(r.h_x10) / 10).toFixed(1))}</td>
+          <td class="num">${esc(fmtBatt(r.batt_mv))}</td>
+          <td class="num">${esc(r.device_min)} min</td>
+          <td class="num">${esc(r.batch)}</td>
+        </tr>`).join("")
+      : '<tr><td colspan="10" class="empty">No samples stored yet.</td></tr>';
+    $("#samplesStatus").textContent = `${rows.length} row(s)`;
+  } catch (e) {
+    $("#samplesStatus").textContent = String(e.message || e);
+    $("#samplesStatus").className = "err";
+  }
+}
+
+$("#samplesReload").addEventListener("click", loadSamples);
+$("#sampleDevice").addEventListener("change", loadSamples);
+$("#sampleLimit").addEventListener("change", loadSamples);
+
+$("#ndAdd").addEventListener("click", async () => {
+  const btn = $("#ndAdd");
+  const body = {
+    id: $("#ndId").value.trim().toUpperCase(),
+    name: $("#ndName").value.trim(),
+    role: $("#ndRole").value,
+    node_id: Number($("#ndNode").value || 0),
+    period_min: Number($("#ndPeriod").value || 0),
+  };
+  if (!/^[0-9A-F]{12}$/.test(body.id)) {
+    setStatus("Device id must be 12 hex characters (the BLE address, no colons).", "err");
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const res = await api("/api/ingest/devices", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    showKey(res.device?.id || body.id, res.key);
+    $("#ndId").value = $("#ndName").value = $("#ndNode").value = $("#ndPeriod").value = "";
+    $("#ndRole").value = "";
+    await loadIngest();
+    setStatus(`Registered ${res.device?.id || body.id}.`, "ok");
+  } catch (e) {
+    setStatus("Register failed: " + (e.message || e), "err");
+  } finally {
+    btn.disabled = !admin;
+  }
+});
+
+$("#ingestList").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-act]");
+  if (!btn) return;
+  const card = btn.closest("[data-id]");
+  const id = card.dataset.id;
+  const act = btn.dataset.act;
+  try {
+    if (act === "save") return await saveIngest(card);
+    if (act === "del") {
+      if (!confirm(`Unregister ${id}? Stored samples are kept.`)) return;
+      await api("/api/ingest/devices/" + encodeURIComponent(id), { method: "DELETE" });
+      await loadIngest();
+      setStatus(`Removed ${id}.`, "ok");
+      return;
+    }
+    if (act === "key") {
+      if (!confirm(`Generate a new key for ${id}? The device stops uploading until it is re-flashed.`)) return;
+      const res = await api("/api/ingest/devices/" + encodeURIComponent(id) + "/key", { method: "POST" });
+      showKey(res.id || id, res.key);
+      setStatus(`Rotated key for ${id}.`, "ok");
+    }
+  } catch (err) {
+    setStatus(`${act} failed: ${err.message || err}`, "err");
+  }
+});
+
+$("#ingestKey").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-copy]");
+  if (!btn) return;
+  try {
+    await navigator.clipboard.writeText(btn.dataset.copy);
+    btn.textContent = "Copied";
+  } catch {
+    // Clipboard needs a secure context; the key is selectable in the <pre>.
+    btn.textContent = "Select the key above";
+  }
+});
+
 // --- load ------------------------------------------------------------------
 
 function setAdmin(on) {
   admin = on;
-  for (const id of ["#add", "#save", "#clear", "#layoutTitle"]) $(id).disabled = !on;
+  for (const id of [
+    "#add", "#save", "#clear", "#layoutTitle", "#ndAdd", "#ingestReload",
+    "#samplesReload", "#sampleDevice", "#sampleLimit",
+  ]) {
+    $(id).disabled = !on;
+  }
+  $("#ingestUrl").textContent = `${location.origin}/v1/samples`;
 }
 
 async function load() {
@@ -357,8 +738,16 @@ async function load() {
       title: String(stored?.title || ""),
       charts: Array.isArray(stored?.charts) ? stored.charts.map(normChart) : [],
     };
+    // Load the ingest registry before rendering: a chart editor needs the
+    // sensor device list when the layout already contains ingest charts.
+    await loadIngest();
     render();
-    setStatus(`Admin unlocked · ${devices.length} devices · ${cfg.charts.length} configured charts.`, "ok");
+    await loadSamples();
+    setStatus(
+      `Admin unlocked · ${devices.length} devices · ${cfg.charts.length} configured charts` +
+        ` · ${ingestDevices.length} ingest device(s).`,
+      "ok",
+    );
   } catch (e) {
     setAdmin(false);
     setStatus(String(e.message || e), "err");

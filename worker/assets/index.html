@@ -491,60 +491,115 @@ function renderAuto(perDevice, daily, win) {
   draws.forEach((d) => d());
 }
 
+/// Cloud series for one configured chart: one line per (metric, device).
+function cloudSeries(spec, byDevice, daily) {
+  const label = (id) => {
+    const d = byDevice.get(id)?.device;
+    return d ? d.name || d.external_id : id;
+  };
+  const ids = (spec.device ? [spec.device] : [...byDevice.keys()]).filter((id) => byDevice.has(id));
+  const series = [];
+
+  // Walk the metrics in the admin's order so the legend and palette are stable.
+  for (const metric of spec.metrics) {
+    for (const id of ids) {
+      const points = [];
+      let sUnit = "";
+      for (const r of byDevice.get(id).rows) {
+        if (r.metric !== metric) continue;
+        const y = daily ? r.avg : r.value;
+        if (y === null || y === undefined || !isFinite(y)) continue;
+        const x = daily ? Date.parse(r.day + "T00:00:00Z") : r.ts * 1000;
+        if (!isFinite(x)) continue;
+        if (!sUnit) sUnit = r.unit || "";
+        points.push({ x, y, label: daily ? r.day : fmtTime(r.ts) });
+      }
+      if (!points.length) continue;
+      points.sort((a, b) => a.x - b.x);
+      series.push({
+        name: ids.length > 1 ? `${metric} · ${label(id)}` : metric,
+        key: metric, points, unit: sUnit,
+      });
+    }
+  }
+  return series;
+}
+
+/// Ingest series for one configured chart. `points` are the long rows from
+/// `/api/ingest/series` for the chart's timeline (`received` or `device`).
+/// One line per (device, node, metric); a mesh sensor with several nodes keeps
+/// its nodes apart instead of collapsing them into one line.
+function ingestSeries(spec, points) {
+  const metrics = new Set(spec.metrics);
+  const wanted = points.filter(
+    (p) => metrics.has(p.metric) && (!spec.device || p.device_id === spec.device)
+  );
+
+  const nodes = new Map();
+  for (const p of wanted) {
+    if (!nodes.has(p.device_id)) nodes.set(p.device_id, new Set());
+    nodes.get(p.device_id).add(p.node_id);
+  }
+
+  const byKey = new Map();
+  for (const p of wanted) {
+    if (p.value === null || p.value === undefined || !isFinite(p.value)) continue;
+    const key = `${p.device_id}|${p.node_id}|${p.metric}`;
+    let s = byKey.get(key);
+    if (!s) {
+      const device = p.device_name || p.device_id;
+      const multiNode = nodes.get(p.device_id).size > 1;
+      const name =
+        (spec.device ? "" : device + " · ") +
+        p.metric +
+        (multiNode ? " · node " + p.node_id : "");
+      s = { name, key: p.metric, points: [], unit: p.unit || "" };
+      byKey.set(key, s);
+    }
+    s.points.push({ x: p.ts * 1000, y: p.value, label: fmtTime(p.ts) });
+  }
+  for (const s of byKey.values()) s.points.sort((a, b) => a.x - b.x);
+  return [...byKey.values()];
+}
+
 /// Render exactly the charts the admin configured: one card per entry, in
 /// order, with the devices and metrics the admin picked. A chart with no
-/// device plots every device that has the metric.
-function renderConfigured(cfg, perDevice, daily, win) {
+/// device plots every device that has the metric. `source` selects the data
+/// table and, for ingest charts, `time` selects which stored clock is the
+/// x axis; `ingest` maps timeline -> rows.
+function renderConfigured(cfg, perDevice, ingest, daily, win) {
   const root = $("#charts");
   root.innerHTML = "";
   draws = [];
 
   const byDevice = new Map(perDevice.map((p) => [p.device.id, p]));
-  const label = (id) => {
-    const d = byDevice.get(id)?.device;
-    return d ? d.name || d.external_id : id;
-  };
 
   const grid = document.createElement("div");
   grid.className = "grid";
 
   for (const spec of cfg.charts) {
-    const ids = (spec.device ? [spec.device] : [...byDevice.keys()]).filter((id) => byDevice.has(id));
-    const series = [];
-
-    // Walk the metrics in the admin's order so the legend and palette are stable.
-    for (const metric of spec.metrics) {
-      for (const id of ids) {
-        const points = [];
-        let sUnit = "";
-        for (const r of byDevice.get(id).rows) {
-          if (r.metric !== metric) continue;
-          const y = daily ? r.avg : r.value;
-          if (y === null || y === undefined || !isFinite(y)) continue;
-          const x = daily ? Date.parse(r.day + "T00:00:00Z") : r.ts * 1000;
-          if (!isFinite(x)) continue;
-          if (!sUnit) sUnit = r.unit || "";
-          points.push({ x, y, label: daily ? r.day : fmtTime(r.ts) });
-        }
-        if (!points.length) continue;
-        points.sort((a, b) => a.x - b.x);
-        series.push({ name: ids.length > 1 ? `${metric} · ${label(id)}` : metric, key: metric, points, unit: sUnit });
-      }
-    }
+    const isIngest = spec.source === "ingest";
+    const time = spec.time === "device" ? "device" : "received";
+    const series = isIngest
+      ? ingestSeries(spec, ingest.get(time) || [])
+      : cloudSeries(spec, byDevice, daily);
 
     // A chart-wide unit only holds when every series agrees on one; on a mixed
     // chart each series carries its own unit into the legend.
     const units = [...new Set(series.map((s) => s.unit || ""))];
     const unit = spec.unit || (units.length === 1 ? units[0] : "");
-
+    const source = isIngest
+      ? time === "device" ? "device clock" : "upload time"
+      : daily ? "daily average" : "15-minute samples";
     const fallback = series.length ? series.map((s) => s.name).join(", ") : spec.metrics.join(", ");
     const { card, draw } = chartCard(
       spec.title || fallback,
-      `${series.length} series · ${daily ? "daily average" : "15-minute samples"}` +
-        (win ? ` · ${fmtRange(win)}` : ""),
+      `${series.length} series · ${source}` + (win ? ` · ${fmtRange(win)}` : ""),
       series,
       unit,
-      daily,
+      // Ingest points are bucketed raw samples; even on a 7-day view they are
+      // exact timestamps, so the x axis must not switch to day-only ticks.
+      daily && !isIngest,
       win,
       spec.kind,
     );
@@ -554,6 +609,65 @@ function renderConfigured(cfg, perDevice, daily, win) {
 
   root.appendChild(grid);
   draws.forEach((d) => d());
+}
+
+/// Automatic view of the ingest data (no configured layout): one card per
+/// device and unit, using the same chart code as the cloud sections.
+function renderIngestAuto(points, win, time) {
+  if (!points.length) return;
+  const first = draws.length;
+
+  const wrap = document.createElement("section");
+  wrap.style.marginTop = "1.5rem";
+  const head = document.createElement("h2");
+  head.textContent = `Ingested sensors · ${time === "device" ? "device clock" : "upload time"}`;
+  wrap.appendChild(head);
+
+  const byDevice = new Map();
+  for (const p of points) {
+    if (!byDevice.has(p.device_id)) byDevice.set(p.device_id, []);
+    byDevice.get(p.device_id).push(p);
+  }
+
+  const grid = document.createElement("div");
+  grid.className = "grid";
+
+  for (const [id, rows] of byDevice) {
+    const label = rows[0].device_name || id;
+    const nodes = new Set(rows.map((r) => r.node_id));
+    const byUnit = new Map();
+    for (const r of rows) {
+      if (r.value === null || r.value === undefined || !isFinite(r.value)) continue;
+      const unit = r.unit || "";
+      if (!byUnit.has(unit)) byUnit.set(unit, new Map());
+      const metrics = byUnit.get(unit);
+      const name = r.metric + (nodes.size > 1 ? " · node " + r.node_id : "");
+      if (!metrics.has(name)) metrics.set(name, []);
+      metrics.get(name).push({ x: r.ts * 1000, y: r.value, label: fmtTime(r.ts) });
+    }
+    for (const [unit, metrics] of [...byUnit].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const series = [...metrics].map(([name, pts]) => ({
+        name, key: name.split(" · ")[0], points: pts.sort((a, b) => a.x - b.x), unit,
+      }));
+      const { card, draw } = chartCard(
+        `${unit || "state"} · ${label}`,
+        `${series.length} series · ${time === "device" ? "device clock" : "upload time"}` +
+          (win ? ` · ${fmtRange(win)}` : ""),
+        series,
+        unit,
+        false,
+        win,
+        "line",
+      );
+      grid.appendChild(card);
+      draws.push(draw);
+    }
+  }
+
+  wrap.appendChild(grid);
+  $("#charts").appendChild(wrap);
+  // `renderAuto` already drew its own cards; draw only the new ones here.
+  draws.slice(first).forEach((d) => d());
 }
 
 // ---------------------------------------------------------------------------
@@ -569,24 +683,51 @@ async function load() {
     const daily = state.range > 2 * 86400;
     const win = { from: from * 1000, to: to * 1000 };
 
-    const devices = await api("/api/devices");
-    state.devices = devices;
+    // The layout decides which data to fetch: an ingest-only dashboard should
+    // not pay for the cloud scans, and a cloud-only one should not touch the
+    // device samples. Without a layout the automatic view shows both.
+    const cfg = await api("/api/config").catch(() => null);
+    state.config = cfg;
+    const charts = cfg?.charts || [];
+    const configured = charts.length > 0;
+    const needCloud = !configured || charts.some((c) => c.source !== "ingest");
+    const needIngest = !configured || charts.some((c) => c.source === "ingest");
 
     const perDevice = [];
-    for (const d of devices) {
-      const q = new URLSearchParams({ device: d.id, from, to });
-      const rows = daily
-        ? await api("/api/daily?" + q)
-        : await api("/api/readings?" + new URLSearchParams({ ...Object.fromEntries(q), limit: 5000 }));
-      perDevice.push({ device: d, rows });
+    if (needCloud) {
+      const devices = await api("/api/devices");
+      state.devices = devices;
+      for (const d of devices) {
+        const q = new URLSearchParams({ device: d.id, from, to });
+        const rows = daily
+          ? await api("/api/daily?" + q)
+          : await api("/api/readings?" + new URLSearchParams({ ...Object.fromEntries(q), limit: 5000 }));
+        perDevice.push({ device: d, rows });
+      }
     }
-    state.config = await api("/api/config").catch(() => null);
-    const cfg = state.config;
-    if (cfg?.charts?.length) {
+
+    // Ingest charts may use either stored clock; fetch each timeline once and
+    // let every chart pick its own. The automatic view always uses upload time,
+    // which is the canonical one.
+    const ingest = new Map();
+    if (needIngest) {
+      const times = new Set();
+      if (!configured) times.add("received");
+      for (const c of charts) {
+        if (c.source === "ingest") times.add(c.time === "device" ? "device" : "received");
+      }
+      for (const t of times) {
+        const q = new URLSearchParams({ from, to, time: t });
+        ingest.set(t, await api("/api/ingest/series?" + q).catch(() => []));
+      }
+    }
+
+    if (configured) {
       if (cfg.title) $("#subtitle").textContent = cfg.title;
-      renderConfigured(cfg, perDevice, daily, win);
+      renderConfigured(cfg, perDevice, ingest, daily, win);
     } else {
       renderAuto(perDevice, daily, win);
+      renderIngestAuto(ingest.get("received") || [], win, "received");
     }
 
     // Collector internals are admin-only: hide them (and skip fetching them)
@@ -609,8 +750,13 @@ async function load() {
       $("#runs tbody").innerHTML = "";
     }
 
-    const total = perDevice.reduce((n, p) => n + p.rows.length, 0);
-    setStatus(`Loaded ${devices.length} devices, ${total} points.`, "ok");
+    const cloud = perDevice.reduce((n, p) => n + p.rows.length, 0);
+    const sensor = [...ingest.values()].reduce((n, rows) => n + (rows?.length || 0), 0);
+    setStatus(
+      `Loaded ${perDevice.length} devices, ${cloud} points` +
+        (sensor ? `, ${sensor} sensor points` : "") + ".",
+      "ok",
+    );
   } catch (e) {
     setStatus(
       navigator.onLine
